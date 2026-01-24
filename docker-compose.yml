@@ -1,0 +1,60 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: aidso_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password123
+      POSTGRES_DB: aidso_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d aidso_db"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  api:
+    build:
+      context: ./aidso-interface-replica/server
+      dockerfile: Dockerfile
+    container_name: aidso_api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PORT: "3005"
+      AUTH_SECRET: "dev-auth-secret-change-me"
+      DATABASE_URL: "postgresql://admin:password123@postgres:5432/aidso_db?schema=public"
+    ports:
+      - "3005:3005"
+    volumes:
+      - ./aidso-interface-replica/server:/app
+      - /app/node_modules
+    command: sh -c "npx prisma migrate deploy && npx ts-node prisma/seed_admin.ts && npm run dev"
+
+  web:
+    build:
+      context: ./aidso-interface-replica
+      dockerfile: Dockerfile
+    container_name: aidso_web
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      AIDSO_API_PROXY_TARGET: "http://api:3005"
+    ports:
+      - "3002:3002"
+    volumes:
+      - ./aidso-interface-replica:/app
+      - /app/node_modules
+    command: sh -c "npm run dev -- --host 0.0.0.0 --port 3002"
+
+volumes:
+  postgres_data:

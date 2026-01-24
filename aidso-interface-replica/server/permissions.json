@@ -1,0 +1,30 @@
+[
+  {
+    "plan": "FREE",
+    "features": [
+      "search",
+      "agent",
+      "monitoring",
+      "optimization",
+      "api"
+    ]
+  },
+  {
+    "plan": "PRO",
+    "features": [
+      "search",
+      "optimization",
+      "agent"
+    ]
+  },
+  {
+    "plan": "ENTERPRISE",
+    "features": [
+      "search",
+      "agent",
+      "optimization",
+      "monitoring",
+      "api"
+    ]
+  }
+]

@@ -1,0 +1,5 @@
+{
+  "name": "AiDSO Interface Replica",
+  "description": "A high-fidelity replica of the AiDSO search and analytics interface using React and Tailwind CSS.",
+  "requestFramePermissions": []
+}

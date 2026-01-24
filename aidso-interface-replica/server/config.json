@@ -1,0 +1,81 @@
+{
+  "newApi": {
+    "models": {
+      "豆包": {
+        "baseUrl": "http://8.137.117.8:80/v1",
+        "apiKey": "sk-L7PQGTjlRzjIRTHsqi3CqKYhB5z8iAguCKmIWla3kVUYLRGt",
+        "model": "doubao-pro-32k",
+        "enabled": false
+      },
+      "DeepSeek": {
+        "baseUrl": "http://8.137.117.8:80/v1",
+        "apiKey": "sk-L7PQGTjlRzjIRTHsqi3CqKYhB5z8iAguCKmIWla3kVUYLRGt",
+        "model": "deepseek-chat",
+        "enabled": true
+      },
+      "腾讯元宝": {
+        "baseUrl": "http://8.137.117.8:80/v1",
+        "apiKey": "sk-L7PQGTjlRzjIRTHsqi3CqKYhB5z8iAguCKmIWla3kVUYLRGt",
+        "model": "hunyuan-turbo",
+        "enabled": false
+      },
+      "文心": {
+        "baseUrl": "http://8.137.117.8:80/v1",
+        "apiKey": "sk-L7PQGTjlRzjIRTHsqi3CqKYhB5z8iAguCKmIWla3kVUYLRGt",
+        "model": "ernie-4.0-turbo-8k",
+        "enabled": false
+      },
+      "通义千问": {
+        "baseUrl": "http://8.137.117.8:80/v1",
+        "apiKey": "sk-L7PQGTjlRzjIRTHsqi3CqKYhB5z8iAguCKmIWla3kVUYLRGt",
+        "model": "qwen-plus",
+        "enabled": true
+      },
+      "智谱GLM": {
+        "baseUrl": "http://8.137.117.8:80/v1",
+        "apiKey": "sk-L7PQGTjlRzjIRTHsqi3CqKYhB5z8iAguCKmIWla3kVUYLRGt",
+        "model": "glm-4",
+        "enabled": true
+      },
+      "Kimi": {
+        "baseUrl": "http://8.137.117.8:80/v1",
+        "apiKey": "sk-L7PQGTjlRzjIRTHsqi3CqKYhB5z8iAguCKmIWla3kVUYLRGt",
+        "model": "moonshot-v1-32k",
+        "enabled": false
+      },
+      "百度AI": {
+        "baseUrl": "http://8.137.117.8:80/v1",
+        "apiKey": "sk-L7PQGTjlRzjIRTHsqi3CqKYhB5z8iAguCKmIWla3kVUYLRGt",
+        "model": "ernie-speed-128k",
+        "enabled": false
+      }
+    },
+    "baseUrl": "http://8.137.117.8:80/v1",
+    "apiKey": "sk-L7PQGTjlRzjIRTHsqi3CqKYhB5z8iAguCKmIWla3kVUYLRGt",
+    "model": "deepseek-chat"
+  },
+  "billing": {
+    "dailyUnitsByPlan": {
+      "FREE": 2,
+      "PRO": 100,
+      "ENTERPRISE": 1000
+    },
+    "searchMultiplier": {
+      "quick": 1,
+      "deep": 2
+    },
+    "modelUnitPrice": {
+      "豆包": 1,
+      "DeepSeek": 1,
+      "腾讯元宝": 1,
+      "文心": 1,
+      "通义千问": 1,
+      "Kimi": 1,
+      "百度AI": 1
+    }
+  },
+  "system": {
+    "maintenanceMode": false,
+    "signupEnabled": true
+  }
+}

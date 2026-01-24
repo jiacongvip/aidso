@@ -1,0 +1,149 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  email     String   @unique
+  password  String
+  name      String?
+  role      Role     @default(USER)
+  points    Int      @default(0)  // 用户点数余额
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  tasks     Task[]
+  payments  Payment[]
+  membership Membership?
+  pointsLogs PointsLog[]
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+model Task {
+  id        String   @id @default(uuid())
+  keyword   String
+  status    TaskStatus @default(PENDING)
+  progress  Int      @default(0)
+  searchType String  @default("quick") // quick | deep
+  selectedModels Json?
+  costUnits Int      @default(0)
+  usageDate String?
+  result    Json?
+  logs      String[]
+  startTime DateTime @default(now())
+  createdAt DateTime @default(now())
+  
+  userId    Int?     // Make optional for guest users initially
+  user      User?    @relation(fields: [userId], references: [id])
+
+  modelRuns TaskModelRun[]
+}
+
+enum TaskStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+model TaskModelRun {
+  id           String             @id @default(uuid())
+  taskId       String
+  task         Task               @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  modelKey     String
+  provider     String?
+  modelName    String?
+  purpose      TaskModelRunPurpose @default(MODEL)
+  status       TaskModelRunStatus  @default(PENDING)
+  prompt       String?
+  responseText String?
+  responseJson Json?
+  error        String?
+  startedAt    DateTime?
+  completedAt  DateTime?
+  createdAt    DateTime           @default(now())
+}
+
+enum TaskModelRunPurpose {
+  MODEL
+  ANALYSIS
+}
+
+enum TaskModelRunStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+model Membership {
+  id        Int      @id @default(autoincrement())
+  plan      Plan     @default(FREE)
+  startDate DateTime @default(now())
+  endDate   DateTime?
+  status    MembershipStatus @default(ACTIVE)
+  
+  userId    Int      @unique
+  user      User     @relation(fields: [userId], references: [id])
+}
+
+enum Plan {
+  FREE
+  PRO
+  ENTERPRISE
+}
+
+enum MembershipStatus {
+  ACTIVE
+  EXPIRED
+  CANCELLED
+}
+
+model Payment {
+  id            Int      @id @default(autoincrement())
+  amount        Float
+  currency      String   @default("CNY")
+  status        PaymentStatus
+  provider      String   // e.g., "stripe", "alipay"
+  transactionId String?
+  createdAt     DateTime @default(now())
+  
+  userId        Int
+  user          User     @relation(fields: [userId], references: [id])
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+model PointsLog {
+  id          Int      @id @default(autoincrement())
+  userId      Int
+  user        User     @relation(fields: [userId], references: [id])
+  amount      Int      // 正数为充值，负数为消费
+  balance     Int      // 操作后余额
+  type        PointsLogType
+  description String?
+  operatorId  Int?     // 操作员ID（管理员充值时）
+  createdAt   DateTime @default(now())
+}
+
+enum PointsLogType {
+  RECHARGE   // 充值
+  CONSUME    // 消费
+  ADMIN_ADD  // 管理员增加
+  ADMIN_SUB  // 管理员扣除
+  REFUND     // 退款
+}
