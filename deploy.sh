@@ -210,7 +210,7 @@ log_success "服务启动命令已执行"
 # ==========================================
 # 8. 等待服务启动并检查状态
 # ==========================================
-log_step "步骤 7/7: 检查服务状态"
+log_step "步骤 7/10: 检查服务状态"
 
 log_info "等待服务启动..."
 sleep 5
@@ -219,8 +219,54 @@ sleep 5
 log_info "检查容器运行状态..."
 
 POSTGRES_STATUS=$(docker inspect -f '{{.State.Running}}' aidso_postgres 2>/dev/null || echo "false")
-API_STATUS=$(docker inspect -f '{{.State.Running}}' aidso_api 2>/dev/null || echo "false")
+API_STATUS=$(docker inspect -f '{{.State.Status}}' aidso_api 2>/dev/null || echo "unknown")
 WEB_STATUS=$(docker inspect -f '{{.State.Running}}' aidso_web 2>/dev/null || echo "false")
+
+# 检查 API 容器是否在重启循环
+if [ "$API_STATUS" = "restarting" ]; then
+    log_error "API 容器正在重启循环中，这通常意味着启动命令失败"
+    log_info "查看 API 容器日志..."
+    docker logs aidso_api --tail 50 2>&1 | head -30
+    echo ""
+    log_info "尝试修复：停止容器并手动执行初始化..."
+    
+    # 停止 API 容器
+    $COMPOSE_CMD stop api 2>/dev/null || true
+    sleep 2
+    
+    # 等待数据库就绪
+    log_info "等待数据库就绪..."
+    for i in {1..60}; do
+        if docker exec aidso_postgres pg_isready -U admin -d aidso_db > /dev/null 2>&1; then
+            log_success "数据库已就绪"
+            break
+        fi
+        sleep 1
+    done
+    
+    # 手动执行迁移和种子数据（使用 run 而不是 exec，因为容器已停止）
+    log_info "手动执行数据库迁移..."
+    if $COMPOSE_CMD run --rm api npx prisma migrate deploy 2>&1; then
+        log_success "数据库迁移完成"
+    else
+        log_warn "迁移执行可能失败，继续..."
+    fi
+    
+    log_info "手动执行种子数据..."
+    if $COMPOSE_CMD run --rm api npx ts-node prisma/seed_admin.ts 2>&1; then
+        log_success "种子数据执行完成"
+    else
+        log_warn "种子数据执行可能失败，继续..."
+    fi
+    
+    # 重新启动 API 容器（使用简化的启动命令）
+    log_info "重新启动 API 容器..."
+    $COMPOSE_CMD up -d api
+    sleep 5
+    
+    # 重新检查状态
+    API_STATUS=$(docker inspect -f '{{.State.Status}}' aidso_api 2>/dev/null || echo "unknown")
+fi
 
 # 等待数据库就绪
 if [ "$POSTGRES_STATUS" = "true" ]; then
@@ -237,6 +283,33 @@ if [ "$POSTGRES_STATUS" = "true" ]; then
         fi
     done
 fi
+
+# 等待 API 容器完全启动（不再重启）
+if [ "$API_STATUS" != "running" ]; then
+    log_info "等待 API 容器完全启动..."
+    for i in {1..60}; do
+        API_STATUS=$(docker inspect -f '{{.State.Status}}' aidso_api 2>/dev/null || echo "unknown")
+        if [ "$API_STATUS" = "running" ]; then
+            log_success "API 容器已启动"
+            break
+        fi
+        if [ "$API_STATUS" = "restarting" ]; then
+            if [ $i -eq 60 ]; then
+                log_error "API 容器一直在重启，查看详细日志..."
+                docker logs aidso_api --tail 50 2>&1
+                log_error "请检查 docker-compose.yml 中的启动命令"
+                exit 1
+            fi
+            log_info "API 容器正在重启，等待中... ($i/60)"
+            sleep 2
+        else
+            sleep 1
+        fi
+    done
+fi
+
+# 更新状态变量
+API_STATUS=$(docker inspect -f '{{.State.Running}}' aidso_api 2>/dev/null || echo "false")
 
 # 显示容器状态
 echo ""
@@ -292,7 +365,7 @@ done
 # ==========================================
 # 9. 检查并修复数据库初始化
 # ==========================================
-log_step "检查并修复数据库初始化"
+log_step "步骤 8/10: 检查并修复数据库初始化"
 
 if [ "$POSTGRES_STATUS" = "true" ] && [ "$API_STATUS" = "true" ]; then
     log_info "检查数据库初始化状态..."
@@ -320,16 +393,26 @@ if [ "$POSTGRES_STATUS" = "true" ] && [ "$API_STATUS" = "true" ]; then
         else
             log_warn "数据库表未创建，正在执行迁移..."
             log_info "执行 Prisma 迁移..."
-            if docker exec aidso_api npx prisma migrate deploy 2>&1; then
-                log_success "数据库迁移完成"
-                sleep 2
-                # 重新检查表数量
-                TABLE_COUNT=$(docker exec aidso_postgres psql -U admin -d aidso_db -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public';" 2>/dev/null | tr -d ' ' || echo "0")
-                if [ "$TABLE_COUNT" != "0" ]; then
-                    log_success "数据库表已创建 ($TABLE_COUNT 个表)"
-                fi
+            
+            # 等待 API 容器完全就绪
+            sleep 3
+            
+            # 尝试执行迁移
+            MIGRATE_OUTPUT=$(docker exec aidso_api npx prisma migrate deploy 2>&1 || echo "ERROR")
+            if echo "$MIGRATE_OUTPUT" | grep -qi "error\|fail" && ! echo "$MIGRATE_OUTPUT" | grep -qi "already applied\|no pending"; then
+                log_warn "迁移执行可能失败，尝试使用 run 方式..."
+                $COMPOSE_CMD run --rm api npx prisma migrate deploy 2>&1 || log_warn "迁移执行失败"
             else
-                log_warn "迁移执行可能失败，查看日志..."
+                log_success "数据库迁移完成"
+            fi
+            
+            sleep 2
+            # 重新检查表数量
+            TABLE_COUNT=$(docker exec aidso_postgres psql -U admin -d aidso_db -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public';" 2>/dev/null | tr -d ' ' || echo "0")
+            if [ "$TABLE_COUNT" != "0" ]; then
+                log_success "数据库表已创建 ($TABLE_COUNT 个表)"
+            else
+                log_warn "数据库表仍未创建，查看日志..."
                 docker logs aidso_api --tail 30 2>/dev/null | grep -i "migrate\|error" || true
             fi
         fi
@@ -341,12 +424,15 @@ if [ "$POSTGRES_STATUS" = "true" ] && [ "$API_STATUS" = "true" ]; then
                 log_success "数据库初始化完成，已有 $USER_COUNT 个用户"
             else
                 log_warn "数据库中没有用户，正在初始化管理员账号..."
-                if docker exec aidso_api npx ts-node prisma/seed_admin.ts 2>&1; then
+                sleep 2
+                
+                SEED_OUTPUT=$(docker exec aidso_api npx ts-node prisma/seed_admin.ts 2>&1 || echo "ERROR")
+                if echo "$SEED_OUTPUT" | grep -qi "error\|fail" && ! echo "$SEED_OUTPUT" | grep -qi "already exists\|duplicate"; then
+                    log_warn "种子数据执行可能失败，尝试使用 run 方式..."
+                    $COMPOSE_CMD run --rm api npx ts-node prisma/seed_admin.ts 2>&1 || log_warn "种子数据执行失败"
+                else
                     log_success "管理员账号初始化完成"
                     log_info "默认账号: admin / 111111"
-                else
-                    log_warn "种子数据执行可能失败，请查看日志"
-                    docker logs aidso_api --tail 20 2>/dev/null | grep -i "seed\|error" || true
                 fi
             fi
         fi
@@ -364,21 +450,43 @@ if [ "$POSTGRES_STATUS" = "true" ] && [ "$API_STATUS" = "true" ]; then
     fi
 fi
 
+# ==========================================
+# 10. 检查 API 健康状态并修复
+# ==========================================
+log_step "步骤 9/10: 检查 API 健康状态"
+
 # 如果 API 健康检查失败，尝试重启并重新检查
 API_HEALTH_OK=false
-for i in {1..30}; do
+log_info "等待 API 服务就绪（这可能需要更长时间，因为需要执行数据库迁移）..."
+for i in {1..60}; do
     if curl -s http://localhost:3005/health > /dev/null 2>&1; then
         API_HEALTH_OK=true
+        log_success "API 服务已就绪"
         break
     fi
-    sleep 2
+    if [ $i -eq 60 ]; then
+        log_warn "API 健康检查超时"
+    else
+        sleep 2
+    fi
 done
 
 if [ "$API_HEALTH_OK" = false ] && [ "$API_STATUS" = "true" ]; then
     log_warn "API 健康检查失败，尝试重启 API 服务..."
     $COMPOSE_CMD restart api
+    
+    # 等待容器重新启动
     sleep 5
-    for i in {1..20}; do
+    for i in {1..30}; do
+        API_STATUS=$(docker inspect -f '{{.State.Status}}' aidso_api 2>/dev/null || echo "unknown")
+        if [ "$API_STATUS" = "running" ]; then
+            break
+        fi
+        sleep 2
+    done
+    
+    # 再次检查健康状态
+    for i in {1..30}; do
         if curl -s http://localhost:3005/health > /dev/null 2>&1; then
             log_success "API 服务已就绪"
             API_HEALTH_OK=true
@@ -393,14 +501,16 @@ if [ "$API_HEALTH_OK" = true ]; then
 else
     log_warn "API 健康检查超时，但容器正在运行"
     log_info "查看 API 日志以了解详情..."
-    docker logs aidso_api --tail 30 2>/dev/null || true
+    docker logs aidso_api --tail 50 2>&1 | head -30
+    echo ""
+    log_info "如果 API 容器一直在重启，可能需要检查启动命令"
 fi
 
 # ==========================================
-# 10. 验证登录接口
+# 11. 验证登录接口并自动修复
 # ==========================================
 if [ "$API_HEALTH_OK" = true ]; then
-    log_step "验证登录接口"
+    log_step "步骤 10/10: 验证登录接口"
     log_info "测试登录接口..."
     
     sleep 2
@@ -418,8 +528,41 @@ if [ "$API_HEALTH_OK" = true ]; then
         log_info "如果这是首次部署，请确认管理员账号已初始化"
     elif [ "$HTTP_CODE" = "500" ]; then
         log_error "登录接口返回 500（服务器错误）"
-        log_info "这通常是数据库问题，请查看 API 日志："
-        log_info "   $COMPOSE_CMD logs -f api"
+        log_info "尝试自动修复..."
+        
+        # 检查数据库表
+        TABLE_COUNT=$(docker exec aidso_postgres psql -U admin -d aidso_db -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public';" 2>/dev/null | tr -d ' ' || echo "0")
+        if [ "$TABLE_COUNT" = "0" ]; then
+            log_info "数据库表不存在，执行迁移..."
+            $COMPOSE_CMD run --rm api npx prisma migrate deploy 2>&1 || true
+            sleep 2
+        fi
+        
+        # 检查用户
+        USER_COUNT=$(docker exec aidso_postgres psql -U admin -d aidso_db -t -c "SELECT COUNT(*) FROM users;" 2>/dev/null | tr -d ' ' || echo "0")
+        if [ "$USER_COUNT" = "0" ]; then
+            log_info "数据库中没有用户，执行种子数据..."
+            $COMPOSE_CMD run --rm api npx ts-node prisma/seed_admin.ts 2>&1 || true
+            sleep 2
+        fi
+        
+        # 重启 API 并重新测试
+        log_info "重启 API 服务..."
+        $COMPOSE_CMD restart api
+        sleep 5
+        
+        # 重新测试
+        RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST http://localhost:3005/api/auth/login \
+          -H 'Content-Type: application/json' \
+          -d '{"email":"admin","password":"111111"}' 2>&1 || echo "ERROR")
+        
+        HTTP_CODE=$(echo "$RESPONSE" | grep "HTTP_CODE" | cut -d: -f2 || echo "000")
+        if [ "$HTTP_CODE" = "200" ]; then
+            log_success "修复成功！登录接口现在返回 200"
+        else
+            log_warn "修复后仍返回状态码: $HTTP_CODE"
+            log_info "请查看 API 日志: $COMPOSE_CMD logs -f api"
+        fi
     else
         log_warn "登录接口返回状态码: $HTTP_CODE"
     fi
@@ -427,7 +570,7 @@ if [ "$API_HEALTH_OK" = true ]; then
 fi
 
 # ==========================================
-# 11. 显示部署信息
+# 12. 显示部署信息
 # ==========================================
 # 获取服务器 IP
 SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || \
