@@ -9,6 +9,7 @@
 #   指定分支: bash deploy.sh --branch main
 #   导出数据: bash deploy.sh --export-data
 #   导入数据: bash deploy.sh --import-data data_export_*.tar.gz
+#   自动导入: bash deploy.sh --import-data auto  (自动查找最新的导出文件)
 # ==========================================
 
 set -e  # 遇到错误立即退出
@@ -128,17 +129,35 @@ fi
 if [ -n "$IMPORT_DATA" ]; then
     log_step "导入数据"
     
-    # 处理通配符（如果包含 *）
-    if [[ "$IMPORT_DATA" == *"*"* ]]; then
-        # 使用 shell 展开通配符
-        MATCHED_FILES=( $IMPORT_DATA )
+    # 先拉取最新代码（确保脚本是最新的）
+    if [ -d ".git" ]; then
+        log_info "拉取最新代码..."
+        git pull origin main 2>/dev/null || git pull origin master 2>/dev/null || log_warn "Git pull 失败，继续使用本地代码"
+    fi
+    
+    # 处理通配符或自动查找文件
+    if [[ "$IMPORT_DATA" == *"*"* ]] || [ "$IMPORT_DATA" = "auto" ] || [ "$IMPORT_DATA" = "" ]; then
+        # 自动查找最新的导出文件
+        log_info "自动查找导出文件..."
+        MATCHED_FILES=( $(ls -t data_export_*.tar.gz 2>/dev/null) )
+        
         if [ ${#MATCHED_FILES[@]} -eq 0 ]; then
-            log_error "未找到匹配的文件: $IMPORT_DATA"
-            log_info "当前目录中的导出文件："
-            ls -la data_export_*.tar.gz 2>/dev/null || echo "   未找到 data_export_*.tar.gz 文件"
-            exit 1
+            # 也尝试查找目录
+            MATCHED_DIRS=( $(ls -td data_export_* 2>/dev/null | grep -v "\.tar\.gz$") )
+            if [ ${#MATCHED_DIRS[@]} -gt 0 ]; then
+                log_info "找到导出目录: ${MATCHED_DIRS[0]}"
+                IMPORT_DATA="${MATCHED_DIRS[0]}"
+            else
+                log_error "未找到导出文件或目录"
+                log_info "当前目录中的文件："
+                ls -la | grep -E "data_export|\.tar\.gz" || echo "   未找到相关文件"
+                log_info ""
+                log_info "请先上传导出文件到服务器，或使用完整文件名："
+                log_info "   bash deploy.sh --import-data data_export_20240101_120000.tar.gz"
+                exit 1
+            fi
         elif [ ${#MATCHED_FILES[@]} -gt 1 ]; then
-            log_warn "找到多个匹配文件，使用第一个: ${MATCHED_FILES[0]}"
+            log_warn "找到多个匹配文件，使用最新的: ${MATCHED_FILES[0]}"
             IMPORT_DATA="${MATCHED_FILES[0]}"
         else
             IMPORT_DATA="${MATCHED_FILES[0]}"
