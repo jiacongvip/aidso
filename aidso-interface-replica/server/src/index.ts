@@ -1513,39 +1513,23 @@ app.post('/api/admin/config', requireAdmin(), (req, res) => {
             }
         }
         
-        // 写入文件（先写入临时文件，然后重命名，确保原子性）
-        const tempFile = CONFIG_FILE + '.tmp';
+        // 直接写入文件（Docker bind mount 环境下 rename 会导致 EBUSY）
         const configString = JSON.stringify(configData, null, 2);
         
         try {
-            console.log('[Config Save] Writing to temp file:', tempFile);
-            fs.writeFileSync(tempFile, configString, 'utf8');
+            console.log('[Config Save] Writing directly to config file:', CONFIG_FILE);
             
-            // 验证临时文件
-            const written = fs.readFileSync(tempFile, 'utf8');
-            JSON.parse(written); // 验证 JSON 格式
-            
-            // 原子性替换
-            console.log('[Config Save] Renaming temp file to config file');
-            fs.renameSync(tempFile, CONFIG_FILE);
+            // 直接写入文件
+            fs.writeFileSync(CONFIG_FILE, configString, 'utf8');
             
             // 验证文件是否写入成功
-            if (!fs.existsSync(CONFIG_FILE)) {
-                throw new Error('File was not created after write');
-            }
+            const saved = fs.readFileSync(CONFIG_FILE, 'utf8');
+            JSON.parse(saved); // 验证 JSON 格式
             
-            // 验证文件内容
-            const saved = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
             console.log('[Config Save] Config saved successfully, size:', configString.length, 'bytes');
             
             res.json({ success: true });
         } catch (writeError: any) {
-            // 清理临时文件
-            try { 
-                if (fs.existsSync(tempFile)) {
-                    fs.unlinkSync(tempFile); 
-                }
-            } catch {}
             console.error('[Config Save] Write error:', writeError);
             throw writeError;
         }
