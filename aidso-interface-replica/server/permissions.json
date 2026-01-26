@@ -2,19 +2,15 @@
   {
     "plan": "FREE",
     "features": [
-      "search",
-      "agent",
-      "monitoring",
-      "optimization",
-      "api"
+      "search"
     ]
   },
   {
     "plan": "PRO",
     "features": [
       "search",
-      "optimization",
-      "agent"
+      "agent",
+      "optimization"
     ]
   },
   {

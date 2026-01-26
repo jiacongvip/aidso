@@ -257,3 +257,19 @@ model MonitoringTrackedWork {
 
   @@index([projectId, createdAt])
 }
+
+// ==================== 系统配置（存储到数据库） ====================
+
+model SystemConfig {
+  id        String   @id @default("default")  // 使用固定 ID，只有一条记录
+  config    Json     // 存储完整配置 JSON
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model SystemPermission {
+  id        String   @id @default("default")  // 使用固定 ID，只有一条记录
+  config    Json     // 存储权限配置 JSON
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

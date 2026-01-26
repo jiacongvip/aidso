@@ -237,14 +237,82 @@ function getShanghaiUsageDate(date = new Date()) {
   }).format(date);
 }
 
+// 从数据库读取配置（同步版本，用于兼容现有代码）
 function readAppConfig(): any {
+  // 先尝试从文件读取作为后备
   try {
-    if (!fs.existsSync(CONFIG_FILE)) return {};
-    return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
+    if (fs.existsSync(CONFIG_FILE)) {
+      return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
+    }
   } catch (err) {
     console.error('Failed to read config.json', err);
-    return {};
   }
+  return {};
+}
+
+// 从数据库读取配置（异步版本）
+async function readAppConfigFromDB(): Promise<any> {
+  try {
+    const record = await prisma.systemConfig.findUnique({ where: { id: 'default' } });
+    if (record && record.config) {
+      return record.config as any;
+    }
+    // 如果数据库没有，尝试从文件读取并迁移到数据库
+    const fileConfig = readAppConfig();
+    if (Object.keys(fileConfig).length > 0) {
+      await saveAppConfigToDB(fileConfig);
+      return fileConfig;
+    }
+    return {};
+  } catch (err) {
+    console.error('Failed to read config from DB, falling back to file', err);
+    return readAppConfig();
+  }
+}
+
+// 保存配置到数据库
+async function saveAppConfigToDB(config: any): Promise<void> {
+  await prisma.systemConfig.upsert({
+    where: { id: 'default' },
+    create: { id: 'default', config },
+    update: { config },
+  });
+}
+
+// 从数据库读取权限配置
+async function readPermissionsFromDB(): Promise<any[]> {
+  try {
+    const record = await prisma.systemPermission.findUnique({ where: { id: 'default' } });
+    if (record && record.config) {
+      return record.config as any[];
+    }
+    // 如果数据库没有，尝试从文件读取
+    if (fs.existsSync(PERMISSIONS_FILE)) {
+      const filePerms = JSON.parse(fs.readFileSync(PERMISSIONS_FILE, 'utf-8'));
+      if (Array.isArray(filePerms)) {
+        await savePermissionsToDB(filePerms);
+        return filePerms;
+      }
+    }
+    return [];
+  } catch (err) {
+    console.error('Failed to read permissions from DB', err);
+    try {
+      if (fs.existsSync(PERMISSIONS_FILE)) {
+        return JSON.parse(fs.readFileSync(PERMISSIONS_FILE, 'utf-8'));
+      }
+    } catch {}
+    return [];
+  }
+}
+
+// 保存权限到数据库
+async function savePermissionsToDB(permissions: any[]): Promise<void> {
+  await prisma.systemPermission.upsert({
+    where: { id: 'default' },
+    create: { id: 'default', config: permissions },
+    update: { config: permissions },
+  });
 }
 
 function getBillingConfig(config: any) {
@@ -1370,16 +1438,10 @@ app.get('/api/me/export/pageviews.csv', requireAuth(), async (req, res) => {
 
 // --- Config Routes ---
 
-app.get('/api/admin/config', requireAdmin(), (req, res) => {
+app.get('/api/admin/config', requireAdmin(), async (req, res) => {
     try {
-        if (fs.existsSync(CONFIG_FILE)) {
-            const config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
-            // Mask API Key for security if needed, but for admin panel usually we show it or mask partially
-            // For now sending raw
-            res.json(config);
-        } else {
-            res.json({});
-        }
+        const config = await readAppConfigFromDB();
+        res.json(config);
     } catch (err) {
         console.error('Failed to load config', err);
         res.status(500).json({ error: 'Failed to load config' });
@@ -1450,33 +1512,11 @@ app.get('/api/admin/config/diagnose', requireAdmin(), (req, res) => {
     }
 });
 
-app.post('/api/admin/config', requireAdmin(), (req, res) => {
+app.post('/api/admin/config', requireAdmin(), async (req, res) => {
     console.log('[Config Save] ========== Request received ==========');
     console.log('[Config Save] Time:', new Date().toISOString());
-    console.log('[Config Save] Path:', req.path);
-    console.log('[Config Save] Method:', req.method);
     console.log('[Config Save] User:', (req as any).user ? `${(req as any).user.id} (${(req as any).user.role})` : 'none');
     try {
-        console.log('[Config Save] Starting config save, CONFIG_FILE:', CONFIG_FILE);
-        console.log('[Config Save] Request body keys:', Object.keys(req.body || {}));
-        
-        // 确保目录存在
-        const configDir = path.dirname(CONFIG_FILE);
-        if (!fs.existsSync(configDir)) {
-            console.log('[Config Save] Creating config directory:', configDir);
-            try {
-                fs.mkdirSync(configDir, { recursive: true });
-            } catch (mkdirError: any) {
-                console.error('[Config Save] Failed to create directory:', mkdirError);
-                return res.status(500).json({ 
-                    error: 'Failed to create config directory',
-                    details: mkdirError.message,
-                    code: mkdirError.code,
-                    path: configDir
-                });
-            }
-        }
-        
         // 验证 JSON 数据
         const configData = req.body;
         if (!configData || typeof configData !== 'object') {
@@ -1484,92 +1524,22 @@ app.post('/api/admin/config', requireAdmin(), (req, res) => {
             return res.status(400).json({ error: 'Invalid config data' });
         }
         
-        // 检查文件是否可写（如果文件存在）
-        if (fs.existsSync(CONFIG_FILE)) {
-            try {
-                fs.accessSync(CONFIG_FILE, fs.constants.W_OK);
-            } catch (accessError: any) {
-                // 文件存在但不可写
-                console.error('[Config Save] Config file is not writable:', CONFIG_FILE, accessError);
-                return res.status(500).json({ 
-                    error: 'Config file is not writable',
-                    details: accessError.message,
-                    code: accessError.code,
-                    path: CONFIG_FILE
-                });
-            }
-        } else {
-            // 文件不存在，检查目录是否可写
-            try {
-                fs.accessSync(configDir, fs.constants.W_OK);
-            } catch (accessError: any) {
-                console.error('[Config Save] Config directory is not writable:', configDir, accessError);
-                return res.status(500).json({ 
-                    error: 'Config directory is not writable',
-                    details: accessError.message,
-                    code: accessError.code,
-                    path: configDir
-                });
-            }
-        }
+        console.log('[Config Save] Saving config to database...');
+        console.log('[Config Save] Config keys:', Object.keys(configData));
         
-        // 直接写入文件（Docker bind mount 环境下需要重试机制）
-        const configString = JSON.stringify(configData, null, 2);
+        // 保存到数据库
+        await saveAppConfigToDB(configData);
         
-        // 重试写入函数
-        const writeWithRetry = (maxRetries = 5, delay = 200): void => {
-            for (let attempt = 1; attempt <= maxRetries; attempt++) {
-                try {
-                    console.log(`[Config Save] Attempt ${attempt}/${maxRetries} - Writing to:`, CONFIG_FILE);
-                    
-                    // 使用 flag 'w' 强制覆盖写入
-                    fs.writeFileSync(CONFIG_FILE, configString, { encoding: 'utf8', flag: 'w' });
-                    
-                    // 验证文件是否写入成功
-                    const saved = fs.readFileSync(CONFIG_FILE, 'utf8');
-                    JSON.parse(saved); // 验证 JSON 格式
-                    
-                    console.log('[Config Save] Config saved successfully, size:', configString.length, 'bytes');
-                    return; // 成功，退出
-                } catch (err: any) {
-                    console.error(`[Config Save] Attempt ${attempt} failed:`, err.code, err.message);
-                    
-                    if (attempt === maxRetries) {
-                        throw err; // 最后一次尝试也失败，抛出错误
-                    }
-                    
-                    // EBUSY 错误时等待后重试
-                    if (err.code === 'EBUSY' || err.code === 'EACCES') {
-                        // 同步等待
-                        const waitUntil = Date.now() + delay * attempt;
-                        while (Date.now() < waitUntil) {
-                            // busy wait
-                        }
-                    } else {
-                        throw err; // 其他错误直接抛出
-                    }
-                }
-            }
-        };
-        
-        try {
-            writeWithRetry();
-            res.json({ success: true });
-        } catch (writeError: any) {
-            console.error('[Config Save] All write attempts failed:', writeError);
-            throw writeError;
-        }
+        console.log('[Config Save] Config saved successfully to database');
+        res.json({ success: true });
     } catch (error: any) {
         console.error('[Config Save] Failed to save config:', error);
         const errorMessage = error?.message || 'Unknown error';
-        const errorCode = error?.code || 'UNKNOWN';
-        const errorStack = error?.stack || '';
+        const errorCode = error?.code || 'DB_ERROR';
         res.status(500).json({ 
             error: 'Failed to save config',
             details: errorMessage,
-            code: errorCode,
-            path: CONFIG_FILE,
-            stack: process.env.NODE_ENV === 'development' ? errorStack : undefined
+            code: errorCode
         });
     }
 });
@@ -3710,22 +3680,25 @@ app.get('/api/permissions', (req, res) => {
 });
 
 // 9. Update Permissions
-app.get('/api/admin/permissions', requireAdmin(), (req, res) => {
+app.get('/api/admin/permissions', requireAdmin(), async (req, res) => {
   try {
-    res.json(readPermissionsFile());
+    const permissions = await readPermissionsFromDB();
+    res.json(permissions);
   } catch (error) {
     console.error('Failed to read permissions', error);
     res.status(500).json({ error: 'Failed to read permissions' });
   }
 });
 
-app.post('/api/admin/permissions', requireAdmin(), (req, res) => {
+app.post('/api/admin/permissions', requireAdmin(), async (req, res) => {
     try {
-        fs.writeFileSync(PERMISSIONS_FILE, JSON.stringify(req.body, null, 2));
+        console.log('[Permissions Save] Saving permissions to database...');
+        await savePermissionsToDB(req.body);
+        console.log('[Permissions Save] Permissions saved successfully');
         res.json({ success: true });
-    } catch (error) {
+    } catch (error: any) {
         console.error('Failed to save permissions', error);
-        res.status(500).json({ error: 'Failed to save permissions' });
+        res.status(500).json({ error: 'Failed to save permissions', details: error?.message });
     }
 });
 
