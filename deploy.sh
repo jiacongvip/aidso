@@ -136,17 +136,26 @@ if [ -n "$IMPORT_DATA" ]; then
     fi
     
     # 处理通配符或自动查找文件
-    if [[ "$IMPORT_DATA" == *"*"* ]] || [ "$IMPORT_DATA" = "auto" ] || [ "$IMPORT_DATA" = "" ]; then
+    if [[ "$IMPORT_DATA" == *"*"* ]] || [ "$IMPORT_DATA" = "auto" ]; then
         # 自动查找最新的导出文件
         log_info "自动查找导出文件..."
-        MATCHED_FILES=( $(ls -t data_export_*.tar.gz 2>/dev/null) )
+        
+        # 使用 shopt 启用 nullglob，避免通配符未匹配时返回字面量
+        shopt -s nullglob
+        MATCHED_FILES=( data_export_*.tar.gz )
+        shopt -u nullglob
         
         if [ ${#MATCHED_FILES[@]} -eq 0 ]; then
             # 也尝试查找目录
-            MATCHED_DIRS=( $(ls -td data_export_* 2>/dev/null | grep -v "\.tar\.gz$") )
+            shopt -s nullglob
+            MATCHED_DIRS=( data_export_*/ )
+            shopt -u nullglob
+            
             if [ ${#MATCHED_DIRS[@]} -gt 0 ]; then
-                log_info "找到导出目录: ${MATCHED_DIRS[0]}"
-                IMPORT_DATA="${MATCHED_DIRS[0]}"
+                # 按修改时间排序，取最新的
+                LATEST_DIR=$(ls -td data_export_*/ 2>/dev/null | head -1 | sed 's|/$||')
+                log_info "找到导出目录: $LATEST_DIR"
+                IMPORT_DATA="$LATEST_DIR"
             else
                 log_error "未找到导出文件或目录"
                 log_info "当前目录中的文件："
@@ -156,11 +165,17 @@ if [ -n "$IMPORT_DATA" ]; then
                 log_info "   bash deploy.sh --import-data data_export_20240101_120000.tar.gz"
                 exit 1
             fi
-        elif [ ${#MATCHED_FILES[@]} -gt 1 ]; then
-            log_warn "找到多个匹配文件，使用最新的: ${MATCHED_FILES[0]}"
-            IMPORT_DATA="${MATCHED_FILES[0]}"
         else
-            IMPORT_DATA="${MATCHED_FILES[0]}"
+            # 按修改时间排序，取最新的
+            LATEST_FILE=$(ls -t data_export_*.tar.gz 2>/dev/null | head -1)
+            if [ -n "$LATEST_FILE" ]; then
+                if [ ${#MATCHED_FILES[@]} -gt 1 ]; then
+                    log_warn "找到多个匹配文件，使用最新的: $LATEST_FILE"
+                fi
+                IMPORT_DATA="$LATEST_FILE"
+            else
+                IMPORT_DATA="${MATCHED_FILES[0]}"
+            fi
         fi
         log_info "使用文件: $IMPORT_DATA"
     fi
