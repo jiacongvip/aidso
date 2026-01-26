@@ -42,6 +42,7 @@ GIT_BRANCH=""
 GIT_REMOTE="origin"
 EXPORT_DATA=false
 IMPORT_DATA=""
+SKIP_MIGRATION=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -161,6 +162,10 @@ if [ -n "$IMPORT_DATA" ]; then
         read -p "确认继续？(y/N): " -n 1 -r
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
+            # 停止服务以避免冲突
+            log_info "停止服务以避免冲突..."
+            $COMPOSE_CMD stop api web 2>/dev/null || true
+            
             if docker ps | grep -q aidso_postgres; then
                 log_info "等待数据库就绪..."
                 for i in {1..30}; do
@@ -168,12 +173,50 @@ if [ -n "$IMPORT_DATA" ]; then
                     sleep 1
                 done
                 
-                log_info "导入数据库..."
-                if docker exec -i aidso_postgres psql -U admin -d aidso_db < "$EXPORT_DIR/database.sql" 2>&1; then
-                    log_success "数据库导入完成"
+                # 检查数据库文件大小
+                DB_SIZE=$(stat -f%z "$EXPORT_DIR/database.sql" 2>/dev/null || stat -c%s "$EXPORT_DIR/database.sql" 2>/dev/null || echo "0")
+                if [ "$DB_SIZE" = "0" ]; then
+                    log_error "数据库文件为空，无法导入"
                 else
-                    log_error "数据库导入失败"
+                    log_info "导入数据库（文件大小: $(du -h "$EXPORT_DIR/database.sql" | cut -f1)）..."
+                    
+                    # 先删除现有数据库（如果存在）
+                    log_info "清理现有数据库..."
+                    docker exec aidso_postgres psql -U admin -d postgres -c "DROP DATABASE IF EXISTS aidso_db;" 2>/dev/null || true
+                    docker exec aidso_postgres psql -U admin -d postgres -c "CREATE DATABASE aidso_db;" 2>/dev/null || true
+                    sleep 2
+                    
+                    # 导入数据
+                    IMPORT_OUTPUT=$(docker exec -i aidso_postgres psql -U admin -d aidso_db < "$EXPORT_DIR/database.sql" 2>&1)
+                    IMPORT_EXIT_CODE=$?
+                    
+                    if [ $IMPORT_EXIT_CODE -eq 0 ]; then
+                        log_success "数据库导入完成"
+                        
+                        # 验证导入
+                        sleep 2
+                        USER_COUNT=$(docker exec aidso_postgres psql -U admin -d aidso_db -t -c "SELECT COUNT(*) FROM users;" 2>/dev/null | tr -d ' ' || echo "0")
+                        TABLE_COUNT=$(docker exec aidso_postgres psql -U admin -d aidso_db -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public';" 2>/dev/null | tr -d ' ' || echo "0")
+                        
+                        if [ "$TABLE_COUNT" != "0" ] && [ -n "$TABLE_COUNT" ]; then
+                            log_success "验证成功：数据库有 $TABLE_COUNT 个表"
+                            if [ "$USER_COUNT" != "0" ] && [ -n "$USER_COUNT" ]; then
+                                log_success "验证成功：数据库有 $USER_COUNT 个用户"
+                            else
+                                log_warn "数据库中没有用户，可能需要执行种子数据"
+                            fi
+                        else
+                            log_error "数据库导入后没有表，导入可能失败"
+                            log_info "导入输出: $IMPORT_OUTPUT" | head -20
+                        fi
+                    else
+                        log_error "数据库导入失败（退出码: $IMPORT_EXIT_CODE）"
+                        log_info "导入输出: $IMPORT_OUTPUT" | head -30
+                        log_info "尝试使用迁移重新创建表结构..."
+                    fi
                 fi
+            else
+                log_error "数据库容器未运行，无法导入"
             fi
         else
             log_info "已取消数据库导入"
@@ -192,6 +235,12 @@ if [ -n "$IMPORT_DATA" ]; then
     log_info "备份文件位置: $BACKUP_DIR"
     log_success "数据导入完成，继续部署流程..."
     echo ""
+    
+    # 如果导入了数据库，设置标志，跳过后续的迁移和种子数据
+    if [ -f "$EXPORT_DIR/database.sql" ] && [ -n "$IMPORT_DATA" ]; then
+        SKIP_MIGRATION=true
+        log_info "已导入数据库，将跳过自动迁移和种子数据"
+    fi
 fi
 
 # ==========================================
@@ -524,30 +573,40 @@ if [ "$POSTGRES_STATUS" = "true" ] && [ "$API_STATUS" = "true" ]; then
         
         if [ -n "$TABLE_COUNT" ] && [ "$TABLE_COUNT" != "0" ]; then
             log_success "数据库表已创建 ($TABLE_COUNT 个表)"
+            if [ "$SKIP_MIGRATION" = true ]; then
+                log_info "已导入数据，跳过迁移"
+            fi
         else
-            log_warn "数据库表未创建，正在执行迁移..."
-            log_info "执行 Prisma 迁移..."
-            
-            # 等待 API 容器完全就绪
-            sleep 3
-            
-            # 尝试执行迁移
-            MIGRATE_OUTPUT=$(docker exec aidso_api npx prisma migrate deploy 2>&1 || echo "ERROR")
-            if echo "$MIGRATE_OUTPUT" | grep -qi "error\|fail" && ! echo "$MIGRATE_OUTPUT" | grep -qi "already applied\|no pending"; then
-                log_warn "迁移执行可能失败，尝试使用 run 方式..."
-                $COMPOSE_CMD run --rm api npx prisma migrate deploy 2>&1 || log_warn "迁移执行失败"
+            if [ "$SKIP_MIGRATION" = true ]; then
+                log_warn "已导入数据但表不存在，可能需要执行迁移"
             else
-                log_success "数据库迁移完成"
+                log_warn "数据库表未创建，正在执行迁移..."
             fi
             
-            sleep 2
-            # 重新检查表数量
-            TABLE_COUNT=$(docker exec aidso_postgres psql -U admin -d aidso_db -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public';" 2>/dev/null | tr -d ' ' || echo "0")
-            if [ "$TABLE_COUNT" != "0" ]; then
-                log_success "数据库表已创建 ($TABLE_COUNT 个表)"
-            else
-                log_warn "数据库表仍未创建，查看日志..."
-                docker logs aidso_api --tail 30 2>/dev/null | grep -i "migrate\|error" || true
+            if [ "$SKIP_MIGRATION" != true ]; then
+                log_info "执行 Prisma 迁移..."
+                
+                # 等待 API 容器完全就绪
+                sleep 3
+                
+                # 尝试执行迁移
+                MIGRATE_OUTPUT=$(docker exec aidso_api npx prisma migrate deploy 2>&1 || echo "ERROR")
+                if echo "$MIGRATE_OUTPUT" | grep -qi "error\|fail" && ! echo "$MIGRATE_OUTPUT" | grep -qi "already applied\|no pending"; then
+                    log_warn "迁移执行可能失败，尝试使用 run 方式..."
+                    $COMPOSE_CMD run --rm api npx prisma migrate deploy 2>&1 || log_warn "迁移执行失败"
+                else
+                    log_success "数据库迁移完成"
+                fi
+                
+                sleep 2
+                # 重新检查表数量
+                TABLE_COUNT=$(docker exec aidso_postgres psql -U admin -d aidso_db -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public';" 2>/dev/null | tr -d ' ' || echo "0")
+                if [ "$TABLE_COUNT" != "0" ]; then
+                    log_success "数据库表已创建 ($TABLE_COUNT 个表)"
+                else
+                    log_warn "数据库表仍未创建，查看日志..."
+                    docker logs aidso_api --tail 30 2>/dev/null | grep -i "migrate\|error" || true
+                fi
             fi
         fi
         
@@ -556,17 +615,27 @@ if [ "$POSTGRES_STATUS" = "true" ] && [ "$API_STATUS" = "true" ]; then
             USER_COUNT=$(docker exec aidso_postgres psql -U admin -d aidso_db -t -c "SELECT COUNT(*) FROM users;" 2>/dev/null | tr -d ' ' || echo "0")
             if [ -n "$USER_COUNT" ] && [ "$USER_COUNT" != "0" ]; then
                 log_success "数据库初始化完成，已有 $USER_COUNT 个用户"
+                if [ "$SKIP_MIGRATION" = true ]; then
+                    log_info "已导入数据，跳过种子数据"
+                fi
             else
-                log_warn "数据库中没有用户，正在初始化管理员账号..."
-                sleep 2
-                
-                SEED_OUTPUT=$(docker exec aidso_api npx ts-node prisma/seed_admin.ts 2>&1 || echo "ERROR")
-                if echo "$SEED_OUTPUT" | grep -qi "error\|fail" && ! echo "$SEED_OUTPUT" | grep -qi "already exists\|duplicate"; then
-                    log_warn "种子数据执行可能失败，尝试使用 run 方式..."
-                    $COMPOSE_CMD run --rm api npx ts-node prisma/seed_admin.ts 2>&1 || log_warn "种子数据执行失败"
+                if [ "$SKIP_MIGRATION" = true ]; then
+                    log_warn "已导入数据但数据库中没有用户，可能需要执行种子数据"
                 else
-                    log_success "管理员账号初始化完成"
-                    log_info "默认账号: admin / 111111"
+                    log_warn "数据库中没有用户，正在初始化管理员账号..."
+                fi
+                
+                if [ "$SKIP_MIGRATION" != true ]; then
+                    sleep 2
+                    
+                    SEED_OUTPUT=$(docker exec aidso_api npx ts-node prisma/seed_admin.ts 2>&1 || echo "ERROR")
+                    if echo "$SEED_OUTPUT" | grep -qi "error\|fail" && ! echo "$SEED_OUTPUT" | grep -qi "already exists\|duplicate"; then
+                        log_warn "种子数据执行可能失败，尝试使用 run 方式..."
+                        $COMPOSE_CMD run --rm api npx ts-node prisma/seed_admin.ts 2>&1 || log_warn "种子数据执行失败"
+                    else
+                        log_success "管理员账号初始化完成"
+                        log_info "默认账号: admin / 111111"
+                    fi
                 fi
             fi
         fi
