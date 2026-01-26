@@ -237,9 +237,12 @@ function getShanghaiUsageDate(date = new Date()) {
   }).format(date);
 }
 
-// 从数据库读取配置（同步版本，用于兼容现有代码）
-function readAppConfig(): any {
-  // 先尝试从文件读取作为后备
+// ========== 配置内存缓存 ==========
+let configCache: any = null;
+let configCacheLoaded = false;
+
+// 从文件读取配置（后备方案）
+function readAppConfigFromFile(): any {
   try {
     if (fs.existsSync(CONFIG_FILE)) {
       return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
@@ -250,33 +253,62 @@ function readAppConfig(): any {
   return {};
 }
 
+// 同步读取配置（从内存缓存）
+function readAppConfig(): any {
+  if (configCacheLoaded && configCache) {
+    return configCache;
+  }
+  // 缓存未加载时，先从文件读取
+  return readAppConfigFromFile();
+}
+
 // 从数据库读取配置（异步版本）
 async function readAppConfigFromDB(): Promise<any> {
   try {
     const record = await prisma.systemConfig.findUnique({ where: { id: 'default' } });
     if (record && record.config) {
-      return record.config as any;
+      configCache = record.config as any;
+      configCacheLoaded = true;
+      return configCache;
     }
     // 如果数据库没有，尝试从文件读取并迁移到数据库
-    const fileConfig = readAppConfig();
+    const fileConfig = readAppConfigFromFile();
     if (Object.keys(fileConfig).length > 0) {
       await saveAppConfigToDB(fileConfig);
+      configCache = fileConfig;
+      configCacheLoaded = true;
       return fileConfig;
     }
+    configCache = {};
+    configCacheLoaded = true;
     return {};
   } catch (err) {
     console.error('Failed to read config from DB, falling back to file', err);
-    return readAppConfig();
+    return readAppConfigFromFile();
   }
 }
 
-// 保存配置到数据库
+// 保存配置到数据库（同时更新缓存）
 async function saveAppConfigToDB(config: any): Promise<void> {
   await prisma.systemConfig.upsert({
     where: { id: 'default' },
     create: { id: 'default', config },
     update: { config },
   });
+  // 更新内存缓存
+  configCache = config;
+  configCacheLoaded = true;
+}
+
+// 初始化配置缓存（服务启动时调用）
+async function initConfigCache(): Promise<void> {
+  try {
+    console.log('[Config] Initializing config cache from database...');
+    await readAppConfigFromDB();
+    console.log('[Config] Config cache initialized successfully');
+  } catch (err) {
+    console.error('[Config] Failed to initialize config cache:', err);
+  }
 }
 
 // 从数据库读取权限配置
@@ -5682,7 +5714,18 @@ function startMonitoringScheduler() {
   setInterval(tick, intervalMs);
 }
 
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-  startMonitoringScheduler();
+// 启动服务器
+async function startServer() {
+  // 先初始化配置缓存
+  await initConfigCache();
+  
+  app.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+    startMonitoringScheduler();
+  });
+}
+
+startServer().catch(err => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
 });
