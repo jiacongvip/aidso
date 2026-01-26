@@ -1342,9 +1342,41 @@ app.post('/api/admin/config', requireAdmin(), (req, res) => {
             return res.status(400).json({ error: 'Invalid config data' });
         }
         
-        // 写入文件
+        // 检查文件是否可写
+        try {
+            fs.accessSync(CONFIG_FILE, fs.constants.W_OK);
+        } catch (accessError) {
+            // 如果文件不存在，尝试创建
+            if ((accessError as any).code === 'ENOENT') {
+                // 文件不存在，可以创建
+            } else {
+                // 文件存在但不可写
+                console.error('Config file is not writable', CONFIG_FILE);
+                return res.status(500).json({ 
+                    error: 'Config file is not writable',
+                    details: (accessError as any).message,
+                    code: (accessError as any).code,
+                    path: CONFIG_FILE
+                });
+            }
+        }
+        
+        // 写入文件（先写入临时文件，然后重命名，确保原子性）
+        const tempFile = CONFIG_FILE + '.tmp';
         const configString = JSON.stringify(configData, null, 2);
-        fs.writeFileSync(CONFIG_FILE, configString, 'utf8');
+        
+        try {
+            fs.writeFileSync(tempFile, configString, 'utf8');
+            // 验证临时文件
+            const written = fs.readFileSync(tempFile, 'utf8');
+            JSON.parse(written); // 验证 JSON 格式
+            // 原子性替换
+            fs.renameSync(tempFile, CONFIG_FILE);
+        } catch (writeError: any) {
+            // 清理临时文件
+            try { fs.unlinkSync(tempFile); } catch {}
+            throw writeError;
+        }
         
         // 验证文件是否写入成功
         if (!fs.existsSync(CONFIG_FILE)) {

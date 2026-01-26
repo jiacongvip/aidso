@@ -37,9 +37,9 @@ services:
     ports:
       - "3005:3005"
     volumes:
-      # 挂载配置文件，使其可写
-      - ./aidso-interface-replica/server/config.json:/app/config.json
-      - ./aidso-interface-replica/server/permissions.json:/app/permissions.json
+      # 挂载配置文件，使其可写（使用 bind mount）
+      - ./aidso-interface-replica/server/config.json:/app/config.json:rw
+      - ./aidso-interface-replica/server/permissions.json:/app/permissions.json:rw
     command: sh -c "npx prisma migrate deploy || true && npx ts-node prisma/seed_admin.ts || true && npm run dev"
 
   web:
