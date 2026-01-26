@@ -32,18 +32,63 @@ fi
 log_info "步骤 1/4: 拉取最新代码..."
 git pull origin main 2>/dev/null || git pull origin master 2>/dev/null || log_warn "Git pull 失败，继续..."
 
-# 2. 修复文件权限
-log_info "步骤 2/4: 修复文件权限..."
+# 2. 确保配置文件存在
+log_info "步骤 2/5: 检查配置文件..."
+if [ ! -f "aidso-interface-replica/server/config.json" ]; then
+    log_warn "config.json 不存在，创建默认文件..."
+    cat > aidso-interface-replica/server/config.json << 'EOF'
+{
+  "newApi": {
+    "models": {},
+    "baseUrl": "",
+    "apiKey": "",
+    "model": "deepseek-chat"
+  },
+  "billing": {
+    "dailyUnitsByPlan": {
+      "FREE": 2,
+      "PRO": 100,
+      "ENTERPRISE": 1000
+    },
+    "searchMultiplier": {
+      "quick": 1,
+      "deep": 2
+    },
+    "modelUnitPrice": {}
+  },
+  "system": {
+    "maintenanceMode": false,
+    "signupEnabled": true
+  }
+}
+EOF
+    log_success "已创建默认 config.json"
+fi
+
+if [ ! -f "aidso-interface-replica/server/permissions.json" ]; then
+    log_warn "permissions.json 不存在，创建默认文件..."
+    cat > aidso-interface-replica/server/permissions.json << 'EOF'
+[
+  { "plan": "FREE", "features": ["search"] },
+  { "plan": "PRO", "features": ["search", "agent", "optimization"] },
+  { "plan": "ENTERPRISE", "features": ["search", "agent", "optimization", "monitoring", "api"] }
+]
+EOF
+    log_success "已创建默认 permissions.json"
+fi
+
+# 3. 修复文件权限
+log_info "步骤 3/5: 修复文件权限..."
 chmod 666 aidso-interface-replica/server/config.json 2>/dev/null || log_warn "无法修改 config.json 权限"
 chmod 666 aidso-interface-replica/server/permissions.json 2>/dev/null || log_warn "无法修改 permissions.json 权限"
 log_success "文件权限已修复"
 
-# 3. 重新构建并启动服务
-log_info "步骤 3/4: 重新构建 API 容器（应用最新代码）..."
+# 4. 重新构建并启动服务
+log_info "步骤 4/5: 重新构建 API 容器（应用最新代码）..."
 $COMPOSE_CMD build api
 log_success "API 容器构建完成"
 
-log_info "步骤 4/4: 重启服务..."
+log_info "步骤 5/5: 重启服务..."
 $COMPOSE_CMD down
 $COMPOSE_CMD up -d
 
@@ -61,6 +106,14 @@ if docker ps | grep -q aidso_api; then
     else
         log_warn "容器内写入权限可能有问题"
     fi
+    
+    # 检查配置文件路径
+    log_info "检查容器内配置文件路径..."
+    docker exec aidso_api sh -c "ls -la /app/config.json /app/permissions.json 2>&1" || log_warn "无法检查容器内文件"
+    
+    # 检查容器内实际使用的路径（通过查看日志）
+    log_info "检查服务器启动日志中的配置文件路径..."
+    docker logs aidso_api 2>&1 | grep -i "CONFIG_FILE\|PERMISSIONS_FILE" | tail -5 || log_warn "未找到路径日志"
 else
     log_error "API 容器未启动"
 fi

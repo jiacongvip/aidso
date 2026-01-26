@@ -6,6 +6,7 @@
 #   首次部署: bash deploy.sh
 #   更新代码: bash deploy.sh
 #   强制重建: bash deploy.sh --force
+#   彻底清理: bash deploy.sh --clean (清除缓存+强制拉取代码+重建镜像)
 #   指定分支: bash deploy.sh --branch main
 #   导出数据: bash deploy.sh --export-data
 #   导入数据: bash deploy.sh --import-data data_export_*.tar.gz
@@ -39,6 +40,7 @@ log_step() { echo -e "${CYAN}[STEP]${NC} $1"; }
 # 1. 解析参数
 # ==========================================
 FORCE_BUILD=false
+CLEAN_MODE=false
 GIT_BRANCH=""
 GIT_REMOTE="origin"
 EXPORT_DATA=false
@@ -49,6 +51,11 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --force|-f)
             FORCE_BUILD=true
+            shift
+            ;;
+        --clean|-c)
+            CLEAN_MODE=true
+            FORCE_BUILD=true  # 清理模式自动启用强制重建
             shift
             ;;
         --branch|-b)
@@ -67,12 +74,53 @@ while [[ $# -gt 0 ]]; do
             IMPORT_DATA="$2"
             shift 2
             ;;
+        --help|-h)
+            echo "使用方法："
+            echo "  bash deploy.sh [选项]"
+            echo ""
+            echo "选项："
+            echo "  --force, -f       强制重建 Docker 镜像（清除构建缓存）"
+            echo "  --clean, -c       彻底清理模式（清除缓存+强制拉取代码+删除容器和镜像+重建）"
+            echo "  --branch, -b      指定 Git 分支（默认当前分支）"
+            echo "  --remote, -r      指定 Git 远程仓库（默认 origin）"
+            echo "  --export-data     导出数据库和配置文件"
+            echo "  --import-data     导入数据（后跟文件名或 auto）"
+            echo "  --help, -h        显示帮助信息"
+            echo ""
+            echo "示例："
+            echo "  bash deploy.sh              # 普通部署"
+            echo "  bash deploy.sh --force      # 强制重建镜像"
+            echo "  bash deploy.sh --clean      # 彻底清理并重新部署"
+            echo "  bash deploy.sh --branch main --clean  # 切换到 main 分支并彻底清理"
+            exit 0
+            ;;
         *)
             log_warn "未知参数: $1"
             shift
             ;;
     esac
 done
+
+# 如果是清理模式，显示警告
+if [ "$CLEAN_MODE" = true ]; then
+    echo ""
+    echo -e "${YELLOW}⚠️  彻底清理模式${NC}"
+    echo "这将执行以下操作："
+    echo "  1. 停止并删除所有 aidso 容器"
+    echo "  2. 删除所有 aidso 相关镜像"
+    echo "  3. 清除 Docker 构建缓存"
+    echo "  4. 丢弃本地代码修改，强制拉取最新代码"
+    echo "  5. 重新构建并启动服务"
+    echo ""
+    echo -e "${YELLOW}注意：数据库数据不会被删除（存储在 Docker volume 中）${NC}"
+    echo ""
+    read -p "确认继续？(y/N): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        log_info "已取消"
+        exit 0
+    fi
+fi
 
 # ==========================================
 # 2. 处理数据导出/导入
@@ -327,33 +375,77 @@ fi
 
 log_info "检测到 Git 仓库"
 
-# 检查是否有未提交的更改
-if [ -n "$(git status --porcelain)" ]; then
-    log_warn "检测到本地有未提交的更改"
-    read -p "是否继续部署？(y/N): " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        log_info "部署已取消"
-        exit 0
-    fi
-    log_warn "继续部署，未提交的更改将被保留"
-fi
-
 # 获取当前分支（如果未指定）
 if [ -z "$GIT_BRANCH" ]; then
     GIT_BRANCH=$(git branch --show-current 2>/dev/null || echo "main")
     log_info "当前分支: $GIT_BRANCH"
-else
-    log_info "切换到分支: $GIT_BRANCH"
-    git checkout "$GIT_BRANCH" 2>/dev/null || log_warn "无法切换到分支 $GIT_BRANCH，使用当前分支"
 fi
 
-# 拉取最新代码
-log_info "从 $GIT_REMOTE/$GIT_BRANCH 拉取最新代码..."
-if git pull "$GIT_REMOTE" "$GIT_BRANCH" 2>/dev/null; then
-    log_success "代码拉取成功"
+# 清理模式：强制重置代码
+if [ "$CLEAN_MODE" = true ]; then
+    log_info "清理模式：强制重置本地代码..."
+    
+    # 保存配置文件（如果存在）
+    CONFIG_BACKUP=""
+    PERM_BACKUP=""
+    if [ -f "aidso-interface-replica/server/config.json" ]; then
+        CONFIG_BACKUP=$(cat "aidso-interface-replica/server/config.json")
+        log_info "已备份 config.json"
+    fi
+    if [ -f "aidso-interface-replica/server/permissions.json" ]; then
+        PERM_BACKUP=$(cat "aidso-interface-replica/server/permissions.json")
+        log_info "已备份 permissions.json"
+    fi
+    
+    # 强制重置代码
+    log_info "丢弃所有本地修改..."
+    git fetch "$GIT_REMOTE" --all 2>/dev/null || true
+    git reset --hard "$GIT_REMOTE/$GIT_BRANCH" 2>/dev/null || {
+        log_warn "无法重置到 $GIT_REMOTE/$GIT_BRANCH，尝试其他分支..."
+        git reset --hard "$GIT_REMOTE/main" 2>/dev/null || git reset --hard "$GIT_REMOTE/master" 2>/dev/null || log_warn "重置失败"
+    }
+    git clean -fd 2>/dev/null || true  # 删除未跟踪的文件
+    
+    # 恢复配置文件
+    if [ -n "$CONFIG_BACKUP" ]; then
+        echo "$CONFIG_BACKUP" > "aidso-interface-replica/server/config.json"
+        log_success "已恢复 config.json"
+    fi
+    if [ -n "$PERM_BACKUP" ]; then
+        echo "$PERM_BACKUP" > "aidso-interface-replica/server/permissions.json"
+        log_success "已恢复 permissions.json"
+    fi
+    
+    log_success "代码已强制重置到最新版本"
 else
-    log_warn "Git pull 失败，继续使用本地代码"
+    # 普通模式：检查未提交的更改
+    if [ -n "$(git status --porcelain)" ]; then
+        log_warn "检测到本地有未提交的更改"
+        read -p "是否继续部署？(y/N): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            log_info "部署已取消"
+            exit 0
+        fi
+        log_warn "继续部署，未提交的更改将被保留"
+    fi
+    
+    # 切换分支（如果指定了）
+    if [ -n "$GIT_BRANCH" ]; then
+        CURRENT=$(git branch --show-current 2>/dev/null || echo "")
+        if [ "$CURRENT" != "$GIT_BRANCH" ]; then
+            log_info "切换到分支: $GIT_BRANCH"
+            git checkout "$GIT_BRANCH" 2>/dev/null || log_warn "无法切换到分支 $GIT_BRANCH，使用当前分支"
+        fi
+    fi
+    
+    # 拉取最新代码
+    log_info "从 $GIT_REMOTE/$GIT_BRANCH 拉取最新代码..."
+    if git pull "$GIT_REMOTE" "$GIT_BRANCH" 2>/dev/null; then
+        log_success "代码拉取成功"
+    else
+        log_warn "Git pull 失败，继续使用本地代码"
+    fi
 fi
 
 # 显示当前版本
@@ -420,7 +512,36 @@ log_step "步骤 4/7: 停止旧服务并清理"
 log_info "停止旧服务..."
 $COMPOSE_CMD down 2>/dev/null || true
 
-if [ "$FORCE_BUILD" = true ]; then
+if [ "$CLEAN_MODE" = true ]; then
+    log_info "彻底清理模式：删除容器、镜像和缓存..."
+    
+    # 停止所有 aidso 相关容器
+    log_info "停止所有 aidso 容器..."
+    docker ps -a --filter "name=aidso" -q | xargs -r docker stop 2>/dev/null || true
+    
+    # 删除所有 aidso 相关容器
+    log_info "删除所有 aidso 容器..."
+    docker ps -a --filter "name=aidso" -q | xargs -r docker rm -f 2>/dev/null || true
+    
+    # 删除所有 aidso 相关镜像
+    log_info "删除所有 aidso 相关镜像..."
+    docker images | grep -E "aidso|aidso-interface-replica|aidso-api|aidso-web" | awk '{print $3}' | xargs -r docker rmi -f 2>/dev/null || true
+    
+    # 清理所有悬空镜像
+    log_info "清理悬空镜像..."
+    docker image prune -af 2>/dev/null || true
+    
+    # 清理构建缓存
+    log_info "清理 Docker 构建缓存..."
+    docker builder prune -af 2>/dev/null || true
+    
+    # 清理未使用的网络
+    log_info "清理未使用的网络..."
+    docker network prune -f 2>/dev/null || true
+    
+    log_success "彻底清理完成"
+    
+elif [ "$FORCE_BUILD" = true ]; then
     log_info "强制重建模式：清理 Docker 构建缓存..."
     # 删除项目相关镜像
     docker images | grep -E "aidso|aidso-interface-replica" | awk '{print $3}' | xargs -r docker rmi -f 2>/dev/null || true
@@ -441,12 +562,22 @@ log_step "步骤 5/7: 构建 Docker 镜像"
 
 log_info "开始构建 Docker 镜像（首次可能需要 3-5 分钟）..."
 
-if [ "$FORCE_BUILD" = true ]; then
+if [ "$CLEAN_MODE" = true ] || [ "$FORCE_BUILD" = true ]; then
     log_info "执行强制重建 (--no-cache)..."
-    DOCKER_BUILDKIT=0 $COMPOSE_CMD build --no-cache
+    DOCKER_BUILDKIT=0 $COMPOSE_CMD build --no-cache 2>&1 | tee /tmp/docker_build.log || {
+        log_error "Docker 构建失败"
+        log_info "查看构建日志..."
+        tail -50 /tmp/docker_build.log
+        exit 1
+    }
 else
     log_info "执行增量构建..."
-    DOCKER_BUILDKIT=0 $COMPOSE_CMD build
+    DOCKER_BUILDKIT=0 $COMPOSE_CMD build 2>&1 | tee /tmp/docker_build.log || {
+        log_error "Docker 构建失败"
+        log_info "查看构建日志..."
+        tail -50 /tmp/docker_build.log
+        exit 1
+    }
 fi
 
 log_success "镜像构建完成"

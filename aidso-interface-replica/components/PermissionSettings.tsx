@@ -257,7 +257,11 @@ export const PermissionSettings = () => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(permissions)
             });
-            if (!permRes.ok) throw new Error(`Permission save failed: ${permRes.statusText}`);
+            if (!permRes.ok) {
+                const permError = await permRes.json().catch(() => ({}));
+                const errorMsg = permError?.error || permError?.details || permRes.statusText;
+                throw new Error(`权限保存失败: ${errorMsg}`);
+            }
 
             // Save config
             const configRes = await apiFetch('/api/admin/config', {
@@ -265,12 +269,18 @@ export const PermissionSettings = () => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ ...fullConfig, newApi: newApiConfig, billing: billingConfig })
             });
-            if (!configRes.ok) throw new Error(`Config save failed: ${configRes.statusText}`);
+            if (!configRes.ok) {
+                const configError = await configRes.json().catch(() => ({}));
+                const errorMsg = configError?.error || configError?.details || configRes.statusText;
+                const errorPath = configError?.path ? `\n路径: ${configError.path}` : '';
+                const errorCode = configError?.code ? `\n错误代码: ${configError.code}` : '';
+                throw new Error(`配置保存失败: ${errorMsg}${errorPath}${errorCode}`);
+            }
 
             invalidateBillingPricing();
             alert('✅ 配置已成功保存');
         } catch (err: any) {
-            console.error(err);
+            console.error('保存配置时出错:', err);
             alert(`❌ 保存失败: ${err.message || '未知错误'}`);
         } finally {
             setSaving(false);
@@ -291,6 +301,40 @@ export const PermissionSettings = () => {
             alert(`✅ 连接成功\nprovider: ${data.provider}\nmodel: ${data.model}\npreview: ${data.preview || '-'}`);
         } catch (err: any) {
             alert(`❌ 测试失败: ${err?.message || '未知错误'}`);
+        }
+    };
+
+    const handleDiagnose = async () => {
+        try {
+            const res = await apiFetch('/api/admin/config/diagnose');
+            const data = await res.json().catch(() => null);
+            if (!res.ok) throw new Error((data && (data.error || data.details)) || '诊断失败');
+            
+            const info = data;
+            const report = [
+                '📋 配置文件诊断报告',
+                '━━━━━━━━━━━━━━━━━━━━',
+                `配置文件路径: ${info.configFile}`,
+                `权限文件路径: ${info.permissionsFile}`,
+                `工作目录: ${info.cwd}`,
+                `__dirname: ${info.__dirname}`,
+                '',
+                '文件状态:',
+                `  config.json 存在: ${info.configExists ? '✅' : '❌'}`,
+                `  config.json 可写: ${info.configWritable ? '✅' : '❌'}`,
+                `  permissions.json 存在: ${info.permissionsExists ? '✅' : '❌'}`,
+                `  permissions.json 可写: ${info.permissionsWritable ? '✅' : '❌'}`,
+                `  配置目录存在: ${info.configDirExists ? '✅' : '❌'}`,
+                `  配置目录可写: ${info.configDirWritable ? '✅' : '❌'}`,
+                '',
+                info.errors && info.errors.length > 0 
+                    ? `❌ 发现 ${info.errors.length} 个问题:\n${info.errors.map((e: string) => `  - ${e}`).join('\n')}`
+                    : '✅ 未发现问题'
+            ].join('\n');
+            
+            alert(report);
+        } catch (err: any) {
+            alert(`❌ 诊断失败: ${err?.message || '未知错误'}`);
         }
     };
 
@@ -555,13 +599,22 @@ export const PermissionSettings = () => {
                         <Shield size={18} className="text-gray-500" />
                         会员等级权限配置
                     </h3>
-                    <button 
-                        onClick={handleSave}
-                        disabled={saving}
-                        className="bg-brand-purple text-white px-4 py-2 rounded-lg text-xs font-bold shadow-sm hover:bg-brand-hover flex items-center gap-2 disabled:opacity-50"
-                    >
-                        {saving ? '保存中...' : <><Save size={14} /> 保存全部配置</>}
-                    </button>
+                    <div className="flex items-center gap-2">
+                        <button 
+                            onClick={handleDiagnose}
+                            className="bg-gray-100 text-gray-700 px-3 py-2 rounded-lg text-xs font-bold hover:bg-gray-200 flex items-center gap-2"
+                            title="诊断配置文件问题"
+                        >
+                            🔍 诊断
+                        </button>
+                        <button 
+                            onClick={handleSave}
+                            disabled={saving}
+                            className="bg-brand-purple text-white px-4 py-2 rounded-lg text-xs font-bold shadow-sm hover:bg-brand-hover flex items-center gap-2 disabled:opacity-50"
+                        >
+                            {saving ? '保存中...' : <><Save size={14} /> 保存全部配置</>}
+                        </button>
+                    </div>
                 </div>
                 
                 <div className="p-6">
