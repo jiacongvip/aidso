@@ -1513,24 +1513,50 @@ app.post('/api/admin/config', requireAdmin(), (req, res) => {
             }
         }
         
-        // 直接写入文件（Docker bind mount 环境下 rename 会导致 EBUSY）
+        // 直接写入文件（Docker bind mount 环境下需要重试机制）
         const configString = JSON.stringify(configData, null, 2);
         
+        // 重试写入函数
+        const writeWithRetry = (maxRetries = 5, delay = 200): void => {
+            for (let attempt = 1; attempt <= maxRetries; attempt++) {
+                try {
+                    console.log(`[Config Save] Attempt ${attempt}/${maxRetries} - Writing to:`, CONFIG_FILE);
+                    
+                    // 使用 flag 'w' 强制覆盖写入
+                    fs.writeFileSync(CONFIG_FILE, configString, { encoding: 'utf8', flag: 'w' });
+                    
+                    // 验证文件是否写入成功
+                    const saved = fs.readFileSync(CONFIG_FILE, 'utf8');
+                    JSON.parse(saved); // 验证 JSON 格式
+                    
+                    console.log('[Config Save] Config saved successfully, size:', configString.length, 'bytes');
+                    return; // 成功，退出
+                } catch (err: any) {
+                    console.error(`[Config Save] Attempt ${attempt} failed:`, err.code, err.message);
+                    
+                    if (attempt === maxRetries) {
+                        throw err; // 最后一次尝试也失败，抛出错误
+                    }
+                    
+                    // EBUSY 错误时等待后重试
+                    if (err.code === 'EBUSY' || err.code === 'EACCES') {
+                        // 同步等待
+                        const waitUntil = Date.now() + delay * attempt;
+                        while (Date.now() < waitUntil) {
+                            // busy wait
+                        }
+                    } else {
+                        throw err; // 其他错误直接抛出
+                    }
+                }
+            }
+        };
+        
         try {
-            console.log('[Config Save] Writing directly to config file:', CONFIG_FILE);
-            
-            // 直接写入文件
-            fs.writeFileSync(CONFIG_FILE, configString, 'utf8');
-            
-            // 验证文件是否写入成功
-            const saved = fs.readFileSync(CONFIG_FILE, 'utf8');
-            JSON.parse(saved); // 验证 JSON 格式
-            
-            console.log('[Config Save] Config saved successfully, size:', configString.length, 'bytes');
-            
+            writeWithRetry();
             res.json({ success: true });
         } catch (writeError: any) {
-            console.error('[Config Save] Write error:', writeError);
+            console.error('[Config Save] All write attempts failed:', writeError);
             throw writeError;
         }
     } catch (error: any) {
