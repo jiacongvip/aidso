@@ -3929,9 +3929,9 @@ async function simulateTaskProcessing(taskId: string, keyword: string, selectedM
         let analysisOk = searchType !== 'deep';
         
         try {
-            if (fs.existsSync(CONFIG_FILE)) {
-                const config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
-
+            // 从缓存读取配置（数据库存储）
+            const config = readAppConfig();
+            if (config && Object.keys(config).length > 0) {
                 const modelsToCall = Array.isArray(selectedModels) && selectedModels.length > 0 ? selectedModels : ['默认模型'];
                 const firstCfg = pickNewApiConfigForModel(config, modelsToCall[0]);
                 // 完全使用用户原始输入，不做任何修改
