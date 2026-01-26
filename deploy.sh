@@ -212,8 +212,8 @@ log_success "服务启动命令已执行"
 # ==========================================
 log_step "步骤 7/7: 检查服务状态"
 
-log_info "等待服务启动（10秒）..."
-sleep 10
+log_info "等待服务启动..."
+sleep 5
 
 # 检查容器状态
 log_info "检查容器运行状态..."
@@ -221,6 +221,22 @@ log_info "检查容器运行状态..."
 POSTGRES_STATUS=$(docker inspect -f '{{.State.Running}}' aidso_postgres 2>/dev/null || echo "false")
 API_STATUS=$(docker inspect -f '{{.State.Running}}' aidso_api 2>/dev/null || echo "false")
 WEB_STATUS=$(docker inspect -f '{{.State.Running}}' aidso_web 2>/dev/null || echo "false")
+
+# 等待数据库就绪
+if [ "$POSTGRES_STATUS" = "true" ]; then
+    log_info "等待数据库就绪..."
+    for i in {1..60}; do
+        if docker exec aidso_postgres pg_isready -U admin -d aidso_db > /dev/null 2>&1; then
+            log_success "数据库已就绪"
+            break
+        fi
+        if [ $i -eq 60 ]; then
+            log_warn "数据库启动超时，但继续检查..."
+        else
+            sleep 1
+        fi
+    done
+fi
 
 # 显示容器状态
 echo ""
@@ -258,21 +274,160 @@ else
 fi
 
 # 等待 API 健康检查
-log_info "等待 API 服务就绪..."
-for i in {1..30}; do
+log_info "等待 API 服务就绪（这可能需要更长时间，因为需要执行数据库迁移）..."
+for i in {1..60}; do
     if curl -s http://localhost:3005/health > /dev/null 2>&1; then
         log_success "API 服务已就绪"
         break
     fi
-    if [ $i -eq 30 ]; then
+    if [ $i -eq 60 ]; then
         log_warn "API 健康检查超时，但容器正在运行"
+        log_info "查看 API 日志以了解详情..."
+        docker logs aidso_api --tail 30 2>/dev/null || true
     else
-        sleep 1
+        sleep 2
     fi
 done
 
 # ==========================================
-# 9. 显示部署信息
+# 9. 检查并修复数据库初始化
+# ==========================================
+log_step "检查并修复数据库初始化"
+
+if [ "$POSTGRES_STATUS" = "true" ] && [ "$API_STATUS" = "true" ]; then
+    log_info "检查数据库初始化状态..."
+    sleep 3
+    
+    # 检查数据库连接
+    DB_READY=false
+    for i in {1..30}; do
+        if docker exec aidso_postgres pg_isready -U admin -d aidso_db > /dev/null 2>&1; then
+            DB_READY=true
+            log_success "数据库连接正常"
+            break
+        fi
+        sleep 1
+    done
+    
+    if [ "$DB_READY" = false ]; then
+        log_error "数据库未就绪，跳过数据库检查"
+    else
+        # 检查数据库表是否存在
+        TABLE_COUNT=$(docker exec aidso_postgres psql -U admin -d aidso_db -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public';" 2>/dev/null | tr -d ' ' || echo "0")
+        
+        if [ -n "$TABLE_COUNT" ] && [ "$TABLE_COUNT" != "0" ]; then
+            log_success "数据库表已创建 ($TABLE_COUNT 个表)"
+        else
+            log_warn "数据库表未创建，正在执行迁移..."
+            log_info "执行 Prisma 迁移..."
+            if docker exec aidso_api npx prisma migrate deploy 2>&1; then
+                log_success "数据库迁移完成"
+                sleep 2
+                # 重新检查表数量
+                TABLE_COUNT=$(docker exec aidso_postgres psql -U admin -d aidso_db -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public';" 2>/dev/null | tr -d ' ' || echo "0")
+                if [ "$TABLE_COUNT" != "0" ]; then
+                    log_success "数据库表已创建 ($TABLE_COUNT 个表)"
+                fi
+            else
+                log_warn "迁移执行可能失败，查看日志..."
+                docker logs aidso_api --tail 30 2>/dev/null | grep -i "migrate\|error" || true
+            fi
+        fi
+        
+        # 检查是否有用户
+        if [ "$TABLE_COUNT" != "0" ]; then
+            USER_COUNT=$(docker exec aidso_postgres psql -U admin -d aidso_db -t -c "SELECT COUNT(*) FROM users;" 2>/dev/null | tr -d ' ' || echo "0")
+            if [ -n "$USER_COUNT" ] && [ "$USER_COUNT" != "0" ]; then
+                log_success "数据库初始化完成，已有 $USER_COUNT 个用户"
+            else
+                log_warn "数据库中没有用户，正在初始化管理员账号..."
+                if docker exec aidso_api npx ts-node prisma/seed_admin.ts 2>&1; then
+                    log_success "管理员账号初始化完成"
+                    log_info "默认账号: admin / 111111"
+                else
+                    log_warn "种子数据执行可能失败，请查看日志"
+                    docker logs aidso_api --tail 20 2>/dev/null | grep -i "seed\|error" || true
+                fi
+            fi
+        fi
+        
+        # 确保 Prisma Client 已生成
+        log_info "检查 Prisma Client..."
+        if docker exec aidso_api test -d /app/node_modules/.prisma 2>/dev/null; then
+            log_success "Prisma Client 已生成"
+        else
+            log_warn "Prisma Client 未生成，正在生成..."
+            if docker exec aidso_api npx prisma generate 2>&1; then
+                log_success "Prisma Client 生成完成"
+            fi
+        fi
+    fi
+fi
+
+# 如果 API 健康检查失败，尝试重启并重新检查
+API_HEALTH_OK=false
+for i in {1..30}; do
+    if curl -s http://localhost:3005/health > /dev/null 2>&1; then
+        API_HEALTH_OK=true
+        break
+    fi
+    sleep 2
+done
+
+if [ "$API_HEALTH_OK" = false ] && [ "$API_STATUS" = "true" ]; then
+    log_warn "API 健康检查失败，尝试重启 API 服务..."
+    $COMPOSE_CMD restart api
+    sleep 5
+    for i in {1..20}; do
+        if curl -s http://localhost:3005/health > /dev/null 2>&1; then
+            log_success "API 服务已就绪"
+            API_HEALTH_OK=true
+            break
+        fi
+        sleep 2
+    done
+fi
+
+if [ "$API_HEALTH_OK" = true ]; then
+    log_success "API 服务已就绪"
+else
+    log_warn "API 健康检查超时，但容器正在运行"
+    log_info "查看 API 日志以了解详情..."
+    docker logs aidso_api --tail 30 2>/dev/null || true
+fi
+
+# ==========================================
+# 10. 验证登录接口
+# ==========================================
+if [ "$API_HEALTH_OK" = true ]; then
+    log_step "验证登录接口"
+    log_info "测试登录接口..."
+    
+    sleep 2
+    RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST http://localhost:3005/api/auth/login \
+      -H 'Content-Type: application/json' \
+      -d '{"email":"admin","password":"111111"}' 2>&1 || echo "ERROR")
+    
+    HTTP_CODE=$(echo "$RESPONSE" | grep "HTTP_CODE" | cut -d: -f2 || echo "000")
+    BODY=$(echo "$RESPONSE" | sed '/HTTP_CODE/d')
+    
+    if [ "$HTTP_CODE" = "200" ]; then
+        log_success "登录接口正常，返回 200"
+    elif [ "$HTTP_CODE" = "401" ]; then
+        log_warn "登录接口返回 401（可能是密码错误或用户不存在）"
+        log_info "如果这是首次部署，请确认管理员账号已初始化"
+    elif [ "$HTTP_CODE" = "500" ]; then
+        log_error "登录接口返回 500（服务器错误）"
+        log_info "这通常是数据库问题，请查看 API 日志："
+        log_info "   $COMPOSE_CMD logs -f api"
+    else
+        log_warn "登录接口返回状态码: $HTTP_CODE"
+    fi
+    echo ""
+fi
+
+# ==========================================
+# 11. 显示部署信息
 # ==========================================
 # 获取服务器 IP
 SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || \
