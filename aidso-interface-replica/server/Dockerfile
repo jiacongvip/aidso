@@ -15,6 +15,7 @@ RUN npx prisma generate
 COPY tsconfig.json ./
 COPY src ./src
 COPY config.json permissions.json ./
+COPY nodemon.json ./
 
 EXPOSE 3005
 

@@ -1,0 +1,14 @@
+{
+  "watch": ["src"],
+  "ext": "ts,json",
+  "ignore": [
+    "config.json",
+    "permissions.json",
+    "*.tmp",
+    "node_modules",
+    "dist",
+    "prisma/migrations"
+  ],
+  "exec": "ts-node src/index.ts"
+}
+
