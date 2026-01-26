@@ -7,6 +7,8 @@
 #   更新代码: bash deploy.sh
 #   强制重建: bash deploy.sh --force
 #   指定分支: bash deploy.sh --branch main
+#   导出数据: bash deploy.sh --export-data
+#   导入数据: bash deploy.sh --import-data data_export_*.tar.gz
 # ==========================================
 
 set -e  # 遇到错误立即退出
@@ -38,6 +40,8 @@ log_step() { echo -e "${CYAN}[STEP]${NC} $1"; }
 FORCE_BUILD=false
 GIT_BRANCH=""
 GIT_REMOTE="origin"
+EXPORT_DATA=false
+IMPORT_DATA=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -53,6 +57,14 @@ while [[ $# -gt 0 ]]; do
             GIT_REMOTE="$2"
             shift 2
             ;;
+        --export-data)
+            EXPORT_DATA=true
+            shift
+            ;;
+        --import-data)
+            IMPORT_DATA="$2"
+            shift 2
+            ;;
         *)
             log_warn "未知参数: $1"
             shift
@@ -61,7 +73,129 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ==========================================
-# 2. 检查 Git 环境并拉取代码
+# 2. 处理数据导出/导入
+# ==========================================
+if [ "$EXPORT_DATA" = true ]; then
+    log_step "导出数据"
+    
+    EXPORT_DIR="data_export_$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$EXPORT_DIR"
+    log_success "创建导出目录: $EXPORT_DIR"
+    
+    # 导出数据库
+    if docker ps | grep -q aidso_postgres; then
+        log_info "导出数据库..."
+        if docker exec aidso_postgres pg_dump -U admin -d aidso_db > "$EXPORT_DIR/database.sql" 2>/dev/null; then
+            log_success "数据库导出完成"
+        else
+            log_warn "数据库导出失败"
+        fi
+    else
+        log_warn "数据库容器未运行，跳过数据库导出"
+    fi
+    
+    # 导出配置文件
+    if [ -f "aidso-interface-replica/server/config.json" ]; then
+        cp "aidso-interface-replica/server/config.json" "$EXPORT_DIR/config.json"
+        log_success "配置文件已导出"
+    fi
+    
+    if [ -f "aidso-interface-replica/server/permissions.json" ]; then
+        cp "aidso-interface-replica/server/permissions.json" "$EXPORT_DIR/permissions.json"
+        log_success "权限文件已导出"
+    fi
+    
+    # 打包
+    TAR_FILE="${EXPORT_DIR}.tar.gz"
+    if tar -czf "$TAR_FILE" "$EXPORT_DIR" 2>/dev/null; then
+        log_success "打包完成: $TAR_FILE"
+        log_info "文件大小: $(du -h "$TAR_FILE" | cut -f1)"
+        rm -rf "$EXPORT_DIR"
+    fi
+    
+    echo ""
+    echo "========================================"
+    echo -e "${GREEN}✅ 数据导出完成！${NC}"
+    echo "========================================"
+    echo ""
+    echo "📦 导出文件: $TAR_FILE"
+    echo "📋 下一步：上传到服务器并运行: bash deploy.sh --import-data $TAR_FILE"
+    echo ""
+    exit 0
+fi
+
+if [ -n "$IMPORT_DATA" ]; then
+    log_step "导入数据"
+    
+    # 解压（如果是压缩包）
+    EXPORT_DIR=""
+    if [ -f "$IMPORT_DATA" ] && [[ "$IMPORT_DATA" == *.tar.gz ]]; then
+        log_info "解压 $IMPORT_DATA..."
+        EXPORT_DIR="${IMPORT_DATA%.tar.gz}"
+        tar -xzf "$IMPORT_DATA" 2>/dev/null || {
+            log_error "解压失败"
+            exit 1
+        }
+    elif [ -d "$IMPORT_DATA" ]; then
+        EXPORT_DIR="$IMPORT_DATA"
+    else
+        log_error "未找到导出文件或目录: $IMPORT_DATA"
+        exit 1
+    fi
+    
+    # 备份现有数据
+    BACKUP_DIR="data_backup_$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$BACKUP_DIR"
+    log_info "备份现有数据到: $BACKUP_DIR"
+    
+    if docker ps | grep -q aidso_postgres; then
+        docker exec aidso_postgres pg_dump -U admin -d aidso_db > "$BACKUP_DIR/database.sql" 2>/dev/null || true
+    fi
+    
+    [ -f "aidso-interface-replica/server/config.json" ] && cp "aidso-interface-replica/server/config.json" "$BACKUP_DIR/config.json" || true
+    [ -f "aidso-interface-replica/server/permissions.json" ] && cp "aidso-interface-replica/server/permissions.json" "$BACKUP_DIR/permissions.json" || true
+    
+    # 导入数据库
+    if [ -f "$EXPORT_DIR/database.sql" ]; then
+        log_warn "⚠️  导入数据库将覆盖现有数据！"
+        read -p "确认继续？(y/N): " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            if docker ps | grep -q aidso_postgres; then
+                log_info "等待数据库就绪..."
+                for i in {1..30}; do
+                    docker exec aidso_postgres pg_isready -U admin -d aidso_db > /dev/null 2>&1 && break
+                    sleep 1
+                done
+                
+                log_info "导入数据库..."
+                if docker exec -i aidso_postgres psql -U admin -d aidso_db < "$EXPORT_DIR/database.sql" 2>&1; then
+                    log_success "数据库导入完成"
+                else
+                    log_error "数据库导入失败"
+                fi
+            fi
+        else
+            log_info "已取消数据库导入"
+        fi
+    fi
+    
+    # 导入配置文件
+    [ -f "$EXPORT_DIR/config.json" ] && [ -f "aidso-interface-replica/server/config.json" ] && \
+        cp "$EXPORT_DIR/config.json" "aidso-interface-replica/server/config.json" && \
+        log_success "配置文件已导入"
+    
+    [ -f "$EXPORT_DIR/permissions.json" ] && [ -f "aidso-interface-replica/server/permissions.json" ] && \
+        cp "$EXPORT_DIR/permissions.json" "aidso-interface-replica/server/permissions.json" && \
+        log_success "权限文件已导入"
+    
+    log_info "备份文件位置: $BACKUP_DIR"
+    log_success "数据导入完成，继续部署流程..."
+    echo ""
+fi
+
+# ==========================================
+# 3. 检查 Git 环境并拉取代码
 # ==========================================
 log_step "步骤 1/7: 检查 Git 环境并拉取代码"
 
@@ -107,7 +241,7 @@ CURRENT_COMMIT=$(git log -1 --oneline 2>/dev/null || echo "未知")
 log_info "当前代码版本: $CURRENT_COMMIT"
 
 # ==========================================
-# 3. 检查 Docker 环境
+# 4. 检查 Docker 环境
 # ==========================================
 log_step "步骤 2/7: 检查 Docker 环境"
 
@@ -140,7 +274,7 @@ fi
 log_success "Docker 环境正常，使用: $COMPOSE_CMD"
 
 # ==========================================
-# 4. 检查必要文件
+# 5. 检查必要文件
 # ==========================================
 log_step "步骤 3/7: 检查必要文件"
 
@@ -159,7 +293,7 @@ fi
 log_success "必要文件检查通过"
 
 # ==========================================
-# 5. 停止旧容器并清理
+# 6. 停止旧容器并清理
 # ==========================================
 log_step "步骤 4/7: 停止旧服务并清理"
 
@@ -181,7 +315,7 @@ else
 fi
 
 # ==========================================
-# 6. 构建 Docker 镜像
+# 7. 构建 Docker 镜像
 # ==========================================
 log_step "步骤 5/7: 构建 Docker 镜像"
 
@@ -198,7 +332,7 @@ fi
 log_success "镜像构建完成"
 
 # ==========================================
-# 7. 启动服务
+# 8. 启动服务
 # ==========================================
 log_step "步骤 6/7: 启动服务"
 
