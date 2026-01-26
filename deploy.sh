@@ -128,6 +128,24 @@ fi
 if [ -n "$IMPORT_DATA" ]; then
     log_step "导入数据"
     
+    # 处理通配符（如果包含 *）
+    if [[ "$IMPORT_DATA" == *"*"* ]]; then
+        # 使用 shell 展开通配符
+        MATCHED_FILES=( $IMPORT_DATA )
+        if [ ${#MATCHED_FILES[@]} -eq 0 ]; then
+            log_error "未找到匹配的文件: $IMPORT_DATA"
+            log_info "当前目录中的导出文件："
+            ls -la data_export_*.tar.gz 2>/dev/null || echo "   未找到 data_export_*.tar.gz 文件"
+            exit 1
+        elif [ ${#MATCHED_FILES[@]} -gt 1 ]; then
+            log_warn "找到多个匹配文件，使用第一个: ${MATCHED_FILES[0]}"
+            IMPORT_DATA="${MATCHED_FILES[0]}"
+        else
+            IMPORT_DATA="${MATCHED_FILES[0]}"
+        fi
+        log_info "使用文件: $IMPORT_DATA"
+    fi
+    
     # 解压（如果是压缩包）
     EXPORT_DIR=""
     if [ -f "$IMPORT_DATA" ] && [[ "$IMPORT_DATA" == *.tar.gz ]]; then
@@ -141,6 +159,8 @@ if [ -n "$IMPORT_DATA" ]; then
         EXPORT_DIR="$IMPORT_DATA"
     else
         log_error "未找到导出文件或目录: $IMPORT_DATA"
+        log_info "当前目录中的文件："
+        ls -la | grep -E "data_export|\.tar\.gz" || echo "   未找到相关文件"
         exit 1
     fi
     
