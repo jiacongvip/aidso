@@ -11,4 +11,4 @@ npm install
 npm run dev
 ```
 
-默认通过 `vite.config.ts` 将 `/api` 代理到后端（可用 `VITE_API_PROXY_TARGET` 覆盖）。
+默认通过 `vite.config.ts` 将 `/api` 代理到后端（可用 `AIDSO_API_PROXY_TARGET` 覆盖）。

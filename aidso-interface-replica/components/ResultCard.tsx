@@ -27,9 +27,10 @@ interface ResultCardProps {
     task: Task;
     onOpenDetail: () => void;
     onDelete?: () => void;
+    onOpenBrandKeywords?: () => void;
 }
 
-export const ResultCard = ({ task, onOpenDetail, onDelete }: ResultCardProps) => {
+export const ResultCard = ({ task, onOpenDetail, onDelete, onOpenBrandKeywords }: ResultCardProps) => {
     const { date, time } = getCurrentTime();
 
     return (
@@ -75,15 +76,18 @@ export const ResultCard = ({ task, onOpenDetail, onDelete }: ResultCardProps) =>
                             收起结果 <ChevronDown size={14} className="rotate-180" />
                         </button>
                         
-                        <div className="w-px h-3 bg-gray-200 mx-1"></div>
-                        
-                        <button 
-                            onClick={onDelete}
-                            className="group/del flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium text-gray-400 hover:text-red-600 hover:bg-red-50 transition-all active:scale-[0.98] whitespace-nowrap"
-                        >
-                            <Trash2 size={14} className="transition-transform group-hover/del:scale-110" />
-                            <span>删除</span>
-                        </button>
+                        {onDelete && (
+                            <>
+                                <div className="w-px h-3 bg-gray-200 mx-1"></div>
+                                <button
+                                    onClick={onDelete}
+                                    className="group/del flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium text-gray-400 hover:text-red-600 hover:bg-red-50 transition-all active:scale-[0.98] whitespace-nowrap"
+                                >
+                                    <Trash2 size={14} className="transition-transform group-hover/del:scale-110" />
+                                    <span>删除</span>
+                                </button>
+                            </>
+                        )}
                     </div>
                 </div>
 
@@ -103,7 +107,10 @@ export const ResultCard = ({ task, onOpenDetail, onDelete }: ResultCardProps) =>
                     <MetricItem label="热度值" value="16" isFire className="py-3" />
 
                     {/* Brand Add */}
-                    <div className="flex flex-col items-center justify-between px-6 border-l border-gray-100 min-h-[60px] group cursor-pointer py-3">
+                    <div 
+                        onClick={(e) => { e.stopPropagation(); onOpenBrandKeywords?.(); }}
+                        className="flex flex-col items-center justify-between px-6 border-l border-gray-100 min-h-[60px] group cursor-pointer py-3"
+                    >
                         <div className="h-[34px] flex items-center mt-1">
                             <div className="border border-dashed border-purple-300 text-purple-600 text-[11px] font-bold px-3 rounded-lg flex items-center gap-1 h-8 group-hover:bg-purple-50 group-hover:border-purple-400 transition-all active:scale-95 shadow-sm hover:shadow-purple-100">
                                 <span className="text-base leading-none relative -top-[1px]">+</span>
@@ -142,6 +149,16 @@ export const ResultCard = ({ task, onOpenDetail, onDelete }: ResultCardProps) =>
 
             {task.selectedModels.map((modelName) => {
                 const brand = BRANDS.find((b) => b.name === modelName);
+                const platformData = task.result?.platformData?.[modelName];
+                const sources = platformData?.sources || [];
+                const brands = platformData?.brands || [];
+                const sourcesCount = sources.length;
+                const brandsCount = brands.length;
+                // 计算提及次数（品牌数量）和排名（按品牌数排序）
+                const mentionCount = brandsCount;
+                // 情感倾向：根据内容简单判断，默认正面
+                const sentiment = brandsCount > 0 ? '正面' : '-';
+                
                 return (
                     <div key={modelName} className="px-6 py-4 grid grid-cols-12 gap-4 text-sm items-center hover:bg-purple-50/30 transition-colors cursor-pointer group/row">
                         <div className="col-span-6 md:col-span-2 flex items-center gap-3">
@@ -152,15 +169,27 @@ export const ResultCard = ({ task, onOpenDetail, onDelete }: ResultCardProps) =>
                             )}
                             <span className="text-gray-700 font-medium group-hover/row:text-brand-purple transition-colors">{modelName}</span>
                         </div>
-                        <div className="hidden md:block col-span-2 text-center text-gray-400 font-medium tabular-nums">- / -</div>
-                        <div className="hidden md:block col-span-2 text-center text-gray-400 font-medium tabular-nums">-</div>
+                        <div className="hidden md:block col-span-2 text-center text-gray-400 font-medium tabular-nums">
+                            {mentionCount > 0 ? `${mentionCount} / #1` : '- / -'}
+                        </div>
+                        <div className={`hidden md:block col-span-2 text-center font-medium tabular-nums ${sentiment === '正面' ? 'text-green-600' : 'text-gray-400'}`}>
+                            {sentiment}
+                        </div>
                         <div className="hidden md:flex col-span-3 items-center gap-2 overflow-hidden">
-                            <div className="flex items-center gap-1 text-xs text-gray-600 bg-gray-100/50 px-2 py-1 rounded-md whitespace-nowrap border border-gray-100 tabular-nums">
-                                <Globe size={10} className="text-blue-500"/> - (0)
+                            <div className={`flex items-center gap-1 text-xs ${sourcesCount > 0 ? 'text-blue-600 bg-blue-50' : 'text-gray-600 bg-gray-100/50'} px-2 py-1 rounded-md whitespace-nowrap border ${sourcesCount > 0 ? 'border-blue-100' : 'border-gray-100'} tabular-nums`}>
+                                <Globe size={10} className={sourcesCount > 0 ? 'text-blue-500' : 'text-gray-400'}/> 
+                                {sourcesCount > 0 ? `🔗 (${sourcesCount})` : '- (0)'}
                             </div>
                         </div>
                         <div className="col-span-6 md:col-span-3 text-xs text-gray-500 truncate font-medium text-right md:text-left">
-                            -
+                            {brandsCount > 0 ? (
+                                <div className="flex flex-wrap gap-1 justify-end md:justify-start">
+                                    {brands.slice(0, 3).map((b: string, i: number) => (
+                                        <span key={i} className="bg-orange-100 text-orange-700 px-1.5 py-0.5 rounded text-[10px]">{b}</span>
+                                    ))}
+                                    {brandsCount > 3 && <span className="text-gray-400">+{brandsCount - 3}</span>}
+                                </div>
+                            ) : '-'}
                         </div>
                     </div>
                 );

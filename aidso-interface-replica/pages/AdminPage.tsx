@@ -14,7 +14,17 @@ import { AddUserDrawer } from '../components/AddUserDrawer';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { apiFetch } from '../services/api';
 
-type AdminTab = 'overview' | 'users' | 'engines' | 'logs' | 'settings';
+type AdminTab =
+    | 'overview'
+    | 'reports'
+    | 'users'
+    | 'tasks'
+    | 'engines'
+    | 'calls'
+    | 'billing'
+    | 'pageviews'
+    | 'logs'
+    | 'settings';
 
 // --- Mock Data ---
 
@@ -46,6 +56,16 @@ const MOCK_NOTIFICATIONS = [
     { id: 2, title: '新企业用户', msg: 'TechCorp 订阅了企业版套餐', time: '15分钟前', type: 'success' },
     { id: 3, title: '系统备份完成', msg: '每日全量备份已归档至 S3', time: '1小时前', type: 'info' },
 ];
+
+const formatDurationSeconds = (seconds: number) => {
+    const s = Math.max(0, Math.floor(Number(seconds) || 0));
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const ss = s % 60;
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m ${ss}s`;
+    return `${ss}s`;
+};
 
 // --- Sub-Components ---
 
@@ -237,12 +257,89 @@ const UserDetailDrawer = ({ user, onClose, onUserUpdated }: { user: any, onClose
     const [saving, setSaving] = useState(false);
     const [rechargeAmount, setRechargeAmount] = useState('');
     const [recharging, setRecharging] = useState(false);
+    const [activityTab, setActivityTab] = useState<'tasks' | 'runs' | 'analysis' | 'points' | 'pageviews'>('tasks');
+    const [analytics, setAnalytics] = useState<any>(null);
+    const [userTasks, setUserTasks] = useState<any[]>([]);
+    const [userRuns, setUserRuns] = useState<any[]>([]);
+    const [userPointsLogs, setUserPointsLogs] = useState<any[]>([]);
+    const [userPageViews, setUserPageViews] = useState<any[]>([]);
+    const [activityLoading, setActivityLoading] = useState(false);
+    const [activityError, setActivityError] = useState('');
+    const [taskReport, setTaskReport] = useState<any>(null);
+    const [runDetail, setRunDetail] = useState<any>(null);
+    const [loadingDetail, setLoadingDetail] = useState(false);
 
     useEffect(() => {
         setEditingName(user.name || '');
         const nextPlanKey = user.planKey || (user.plan === '开发者版' ? 'PRO' : user.plan === '企业版' ? 'ENTERPRISE' : 'FREE');
         setEditingPlan(nextPlanKey);
     }, [user]);
+
+    const fetchJson = async (url: string) => {
+        const res = await apiFetch(url);
+        const data = await res.json().catch(() => null);
+        if (!res.ok) {
+            const msg = (data && (data.error || data.message)) || `请求失败（HTTP ${res.status}）`;
+            throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
+        }
+        return data;
+    };
+
+    const downloadCsv = async (url: string, filename: string) => {
+        try {
+            const res = await apiFetch(url);
+            if (!res.ok) {
+                const text = await res.text().catch(() => '');
+                throw new Error(text || `下载失败（HTTP ${res.status}）`);
+            }
+            const blob = await res.blob();
+            const href = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = href;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(href);
+        } catch (err: any) {
+            alert(`❌ 导出失败: ${err?.message || '未知错误'}`);
+        }
+    };
+
+    const refreshActivity = async () => {
+        setActivityLoading(true);
+        setActivityError('');
+        try {
+            const [a, t, r, p, v] = await Promise.all([
+                fetchJson(`/api/admin/users/${user.id}/analytics`),
+                fetchJson(`/api/admin/users/${user.id}/tasks?limit=30`),
+                fetchJson(`/api/admin/users/${user.id}/runs?limit=50`),
+                fetchJson(`/api/admin/users/${user.id}/points-logs?limit=50`),
+                fetchJson(`/api/admin/users/${user.id}/pageviews?limit=50`),
+            ]);
+            setAnalytics(a);
+            setUserTasks(Array.isArray(t) ? t : []);
+            setUserRuns(Array.isArray(r) ? r : []);
+            setUserPointsLogs(Array.isArray(p) ? p : []);
+            setUserPageViews(Array.isArray(v) ? v : []);
+        } catch (err: any) {
+            console.error('Failed to load user activity', err);
+            setActivityError(String(err?.message || err || '加载失败'));
+            setAnalytics(null);
+            setUserTasks([]);
+            setUserRuns([]);
+            setUserPointsLogs([]);
+            setUserPageViews([]);
+        } finally {
+            setActivityLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        setActivityTab('tasks');
+        refreshActivity();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [user?.id]);
 
     const handleSave = async () => {
         setSaving(true);
@@ -258,6 +355,7 @@ const UserDetailDrawer = ({ user, onClose, onUserUpdated }: { user: any, onClose
                 onUserUpdated({ ...user, ...data.user });
             }
             alert('✅ 已保存');
+            refreshActivity();
         } catch (err: any) {
             alert(`❌ 保存失败: ${err?.message || '未知错误'}`);
         } finally {
@@ -297,6 +395,7 @@ const UserDetailDrawer = ({ user, onClose, onUserUpdated }: { user: any, onClose
             setRechargeAmount('');
             // 更新用户点数
             onUserUpdated({ ...user, points: data.points });
+            refreshActivity();
         } catch (err: any) {
             alert(`❌ 充值失败: ${err?.message || '未知错误'}`);
         } finally {
@@ -304,8 +403,32 @@ const UserDetailDrawer = ({ user, onClose, onUserUpdated }: { user: any, onClose
         }
     };
 
+    const openTaskReport = async (taskId: string) => {
+        setLoadingDetail(true);
+        try {
+            const data = await fetchJson(`/api/admin/tasks/${taskId}`);
+            setTaskReport(data);
+        } catch (err: any) {
+            alert(`❌ 获取报告失败: ${err?.message || '未知错误'}`);
+        } finally {
+            setLoadingDetail(false);
+        }
+    };
+
+    const openRunDetail = async (runId: string) => {
+        setLoadingDetail(true);
+        try {
+            const data = await fetchJson(`/api/admin/runs/${runId}`);
+            setRunDetail(data);
+        } catch (err: any) {
+            alert(`❌ 获取调用详情失败: ${err?.message || '未知错误'}`);
+        } finally {
+            setLoadingDetail(false);
+        }
+    };
+
     return (
-        <div className="fixed inset-y-0 right-0 w-[500px] bg-white shadow-2xl border-l border-gray-200 z-[60] animate-slide-in-right overflow-y-auto">
+        <div className="fixed inset-y-0 right-0 w-full sm:w-[1120px] bg-white shadow-2xl border-l border-gray-200 z-[60] animate-slide-in-right overflow-y-auto">
             <div className="p-6 border-b border-gray-100 flex justify-between items-start">
                 <div>
                     <h3 className="text-xl font-bold text-gray-900 mb-1">用户详情</h3>
@@ -439,7 +562,7 @@ const UserDetailDrawer = ({ user, onClose, onUserUpdated }: { user: any, onClose
                     </div>
                     
                     <div className="text-[10px] text-gray-500 mt-3">
-                        💡 提示：每次执行任务消耗 1 点
+                        💡 提示：任务成本=勾选模型单价之和 × 模式倍率（深度更高）。超出当日免费额度后将从点数扣除。
                     </div>
                 </div>
 
@@ -463,50 +586,338 @@ const UserDetailDrawer = ({ user, onClose, onUserUpdated }: { user: any, onClose
                 <div>
                     <h4 className="font-bold text-gray-900 mb-4 flex items-center gap-2">
                         <BarChart2 size={16} className="text-gray-400" />
-                        本月用量统计
+                        用户行为与计费
                     </h4>
-                    <div className="grid grid-cols-2 gap-4">
-                        <div className="p-4 rounded-xl border border-gray-100 bg-white">
-                            <div className="text-xs text-gray-500 mb-1">API 调用次数</div>
-                            <div className="text-xl font-bold text-gray-900">{user.apiCalls.toLocaleString()}</div>
-                            <div className="w-full bg-gray-100 rounded-full h-1.5 mt-2">
-                                <div className="bg-blue-500 h-1.5 rounded-full" style={{ width: '45%' }}></div>
+                    <div className="flex items-center justify-between mb-3">
+                        <div>
+                            <div className="text-xs text-gray-500">
+                                {analytics?.lastActiveAt ? `最后活跃: ${new Date(analytics.lastActiveAt).toLocaleString()}` : '最后活跃: -'}
+                            </div>
+                            {analytics?.today && (
+                                <div className="text-[10px] text-gray-400 mt-1 tabular-nums">
+                                    今日免费额度：剩余 {analytics.today.remainingQuotaUnits} / {analytics.today.dailyLimit}（{analytics.today.usageDate} Asia/Shanghai） · 今日扣点 {analytics.today.pointsUnits}
+                                </div>
+                            )}
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <button
+                                onClick={() => {
+                                    const id = user.id;
+                                    if (!id) return;
+                                    const base = new URLSearchParams();
+                                    base.set('userId', String(id));
+                                    base.set('limit', '5000');
+
+                                    if (activityTab === 'tasks') {
+                                        downloadCsv(`/api/admin/export/tasks.csv?${base.toString()}`, `user_${id}_tasks_${Date.now()}.csv`);
+                                        return;
+                                    }
+                                    if (activityTab === 'runs') {
+                                        base.set('purpose', 'MODEL');
+                                        downloadCsv(`/api/admin/export/runs.csv?${base.toString()}`, `user_${id}_runs_${Date.now()}.csv`);
+                                        return;
+                                    }
+                                    if (activityTab === 'analysis') {
+                                        base.set('purpose', 'ANALYSIS');
+                                        downloadCsv(`/api/admin/export/runs.csv?${base.toString()}`, `user_${id}_analysis_runs_${Date.now()}.csv`);
+                                        return;
+                                    }
+                                    if (activityTab === 'points') {
+                                        downloadCsv(`/api/admin/export/points-logs.csv?${base.toString()}`, `user_${id}_points_logs_${Date.now()}.csv`);
+                                        return;
+                                    }
+                                    downloadCsv(`/api/admin/export/pageviews.csv?${base.toString()}`, `user_${id}_pageviews_${Date.now()}.csv`);
+                                }}
+                                className="text-xs font-bold text-gray-700 hover:underline disabled:opacity-60"
+                            >
+                                导出 CSV
+                            </button>
+                            <button
+                                onClick={refreshActivity}
+                                disabled={activityLoading}
+                                className="text-xs font-bold text-brand-purple hover:underline flex items-center gap-1 disabled:opacity-60"
+                            >
+                                <RefreshCw size={14} className={activityLoading ? 'animate-spin' : ''} /> 刷新
+                            </button>
+                        </div>
+                    </div>
+
+                    {activityError ? (
+                        <div className="p-4 rounded-xl border border-red-100 bg-red-50 text-xs text-red-700">
+                            {activityError}
+                        </div>
+                    ) : (
+                        <div className="grid grid-cols-2 gap-3">
+                            <div className="p-4 rounded-xl border border-gray-100 bg-white">
+                                <div className="text-xs text-gray-500 mb-1">查询记录（任务）</div>
+                                <div className="text-xl font-bold text-gray-900 tabular-nums">{analytics?.counts?.tasks ?? '-'}</div>
+                                <div className="text-[10px] text-gray-400 mt-1">
+                                    成本: {analytics?.totals?.costUnits ?? 0} · 扣点: {analytics?.totals?.pointsUnits ?? 0}
+                                </div>
+                            </div>
+                            <div className="p-4 rounded-xl border border-gray-100 bg-white">
+                                <div className="text-xs text-gray-500 mb-1">调用记录（模型/分析）</div>
+                                <div className="text-xl font-bold text-gray-900 tabular-nums">{analytics?.counts?.runs ?? '-'}</div>
+                                <div className="text-[10px] text-gray-400 mt-1">
+                                    模型: {analytics?.counts?.modelRuns ?? 0} · 分析: {analytics?.counts?.analysisRuns ?? 0}
+                                </div>
+                            </div>
+                            <div className="p-4 rounded-xl border border-gray-100 bg-white">
+                                <div className="text-xs text-gray-500 mb-1">扣费记录（点数）</div>
+                                <div className="text-xl font-bold text-gray-900 tabular-nums">{analytics?.counts?.pointsLogs ?? '-'}</div>
+                                <div className="text-[10px] text-gray-400 mt-1">
+                                    累计消费: {analytics?.totals?.pointsConsumed ?? 0} · 累计充值: {analytics?.totals?.pointsAdded ?? 0}
+                                </div>
+                            </div>
+                            <div className="p-4 rounded-xl border border-gray-100 bg-white">
+                                <div className="text-xs text-gray-500 mb-1">浏览时长（累计）</div>
+                                <div className="text-xl font-bold text-gray-900 tabular-nums">
+                                    {formatDurationSeconds(analytics?.totals?.browsingDurationSeconds ?? 0)}
+                                </div>
+                                <div className="text-[10px] text-gray-400 mt-1">
+                                    访问次数: {analytics?.counts?.pageViews ?? 0}
+                                </div>
                             </div>
                         </div>
-                        <div className="p-4 rounded-xl border border-gray-100 bg-white">
-                            <div className="text-xs text-gray-500 mb-1">Token 消耗量</div>
-                            <div className="text-xl font-bold text-gray-900">{user.tokenUsage}</div>
-                            <div className="w-full bg-gray-100 rounded-full h-1.5 mt-2">
-                                <div className="bg-green-500 h-1.5 rounded-full" style={{ width: '20%' }}></div>
+                    )}
+
+                    {/* Tabs */}
+                    <div className="mt-4 flex items-center gap-2 flex-wrap">
+                        {[
+                            { key: 'tasks', label: '查询记录' },
+                            { key: 'runs', label: '调用记录' },
+                            { key: 'analysis', label: '分析记录' },
+                            { key: 'points', label: '扣费记录' },
+                            { key: 'pageviews', label: '浏览足迹' },
+                        ].map((t) => (
+                            <button
+                                key={t.key}
+                                onClick={() => setActivityTab(t.key as any)}
+                                className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors ${
+                                    activityTab === (t.key as any)
+                                        ? 'bg-brand-purple text-white border-brand-purple'
+                                        : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
+                                }`}
+                            >
+                                {t.label}
+                            </button>
+                        ))}
+                    </div>
+
+                    {/* Tab Content */}
+                    <div className="mt-3 space-y-2">
+                        {activityLoading ? (
+                            <div className="p-4 rounded-xl border border-gray-100 bg-white text-xs text-gray-500 flex items-center gap-2">
+                                <RefreshCw size={14} className="animate-spin" /> 加载中...
                             </div>
-                        </div>
+                        ) : activityTab === 'tasks' ? (
+                            <div className="space-y-2">
+                                {userTasks.length === 0 ? (
+                                    <div className="p-4 rounded-xl border border-gray-100 bg-white text-xs text-gray-400">暂无查询记录</div>
+                                ) : (
+                                    userTasks.map((t) => (
+                                        <div key={t.id} className="p-3 rounded-xl border border-gray-100 bg-white">
+                                            <div className="flex items-start justify-between gap-3">
+                                                <div className="min-w-0">
+                                                    <div className="text-xs font-bold text-gray-900 truncate">{t.keyword}</div>
+                                                    <div className="text-[10px] text-gray-400 mt-1">
+                                                        {new Date(t.createdAt).toLocaleString()} · {t.searchType === 'deep' ? '深度' : '快速'} ·
+                                                        模型 {Array.isArray(t.selectedModels) ? t.selectedModels.length : 0} · 成本 {t.costUnits}（免费 {t.quotaUnits} / 点数 {t.pointsUnits}）
+                                                    </div>
+                                                    {(t.analysisSummary || t.resultSummary) && (
+                                                        <div className="text-[11px] text-gray-600 mt-2 line-clamp-2">
+                                                            {t.analysisSummary || t.resultSummary}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                <div className="flex flex-col items-end gap-2">
+                                                    <span
+                                                        className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                                            t.status === 'COMPLETED'
+                                                                ? 'bg-green-50 text-green-700'
+                                                                : t.status === 'FAILED'
+                                                                  ? 'bg-red-50 text-red-700'
+                                                                  : 'bg-yellow-50 text-yellow-700'
+                                                        }`}
+                                                    >
+                                                        {t.status}
+                                                    </span>
+                                                    <button
+                                                        onClick={() => openTaskReport(t.id)}
+                                                        disabled={loadingDetail}
+                                                        className="text-[10px] font-bold text-brand-purple hover:underline disabled:opacity-60"
+                                                    >
+                                                        查看报告
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+                        ) : activityTab === 'runs' || activityTab === 'analysis' ? (
+                            <div className="space-y-2">
+                                {userRuns.filter((r) => (activityTab === 'analysis' ? r.purpose === 'ANALYSIS' : r.purpose === 'MODEL')).length === 0 ? (
+                                    <div className="p-4 rounded-xl border border-gray-100 bg-white text-xs text-gray-400">
+                                        暂无{activityTab === 'analysis' ? '分析' : '调用'}记录
+                                    </div>
+                                ) : (
+                                    userRuns
+                                        .filter((r) => (activityTab === 'analysis' ? r.purpose === 'ANALYSIS' : r.purpose === 'MODEL'))
+                                        .map((r) => (
+                                            <div key={r.id} className="p-3 rounded-xl border border-gray-100 bg-white">
+                                                <div className="flex items-start justify-between gap-3">
+                                                    <div className="min-w-0">
+                                                        <div className="text-xs font-bold text-gray-900 truncate">
+                                                            {r.modelKey} · {r.status}
+                                                        </div>
+                                                        <div className="text-[10px] text-gray-400 mt-1">
+                                                            {new Date(r.createdAt).toLocaleString()} · {r.provider || '-'}:{r.modelName || '-'} ·
+                                                            {r.latencyMs ? `${Math.round(r.latencyMs / 1000)}s` : '-'} · 任务: {r.taskKeyword}
+                                                        </div>
+                                                        {r.error && <div className="text-[11px] text-red-600 mt-2 line-clamp-2">{r.error}</div>}
+                                                        {r.responsePreview && (
+                                                            <div className="text-[11px] text-gray-600 mt-2 line-clamp-3 whitespace-pre-wrap">
+                                                                {r.responsePreview}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                    <button
+                                                        onClick={() => openRunDetail(r.id)}
+                                                        disabled={loadingDetail}
+                                                        className="text-[10px] font-bold text-brand-purple hover:underline disabled:opacity-60"
+                                                    >
+                                                        详情
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        ))
+                                )}
+                            </div>
+                        ) : activityTab === 'points' ? (
+                            <div className="space-y-2">
+                                {userPointsLogs.length === 0 ? (
+                                    <div className="p-4 rounded-xl border border-gray-100 bg-white text-xs text-gray-400">暂无扣费记录</div>
+                                ) : (
+                                    userPointsLogs.map((l) => (
+                                        <div key={l.id} className="p-3 rounded-xl border border-gray-100 bg-white">
+                                            <div className="flex items-center justify-between gap-3">
+                                                <div className="min-w-0">
+                                                    <div className="text-xs font-bold text-gray-900">
+                                                        {l.amount > 0 ? `+${l.amount}` : `${l.amount}`} · 余额 {l.balance}
+                                                    </div>
+                                                    <div className="text-[10px] text-gray-400 mt-1">
+                                                        {new Date(l.createdAt).toLocaleString()} · {l.type}
+                                                    </div>
+                                                    {l.description && <div className="text-[11px] text-gray-600 mt-2 line-clamp-2">{l.description}</div>}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+                        ) : (
+                            <div className="space-y-2">
+                                {userPageViews.length === 0 ? (
+                                    <div className="p-4 rounded-xl border border-gray-100 bg-white text-xs text-gray-400">暂无浏览足迹</div>
+                                ) : (
+                                    userPageViews.map((v) => (
+                                        <div key={v.id} className="p-3 rounded-xl border border-gray-100 bg-white">
+                                            <div className="text-xs font-bold text-gray-900 break-all">{v.path}</div>
+                                            <div className="text-[10px] text-gray-400 mt-1">
+                                                {new Date(v.createdAt).toLocaleString()} ·
+                                                时长 {typeof v.durationSeconds === 'number' ? formatDurationSeconds(v.durationSeconds) : '-'} ·
+                                                session {String(v.sessionId).slice(0, 8)}…
+                                            </div>
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+                        )}
                     </div>
                 </div>
 
-                {/* Recent Logs (Mini) */}
-                <div>
-                    <h4 className="font-bold text-gray-900 mb-4 flex items-center gap-2">
-                        <Terminal size={16} className="text-gray-400" />
-                        近期调用日志
-                    </h4>
-                    <div className="space-y-2">
-                        {MOCK_API_LOGS.slice(0, 3).map((log, i) => (
-                            <div key={i} className="flex items-center justify-between p-3 rounded-lg border border-gray-100 bg-white text-xs">
-                                <div className="flex items-center gap-3">
-                                    <span className={`px-1.5 py-0.5 rounded font-mono font-bold ${log.status === 200 ? 'bg-green-50 text-green-600' : 'bg-red-50 text-red-600'}`}>
-                                        {log.status}
-                                    </span>
-                                    <span className="font-mono text-gray-600">{log.method} {log.path}</span>
-                                </div>
-                                <span className="text-gray-400">{log.time}</span>
-                            </div>
-                        ))}
-                    </div>
-                    <button className="w-full mt-3 text-xs text-brand-purple font-bold hover:underline">
-                        查看全部历史记录
-                    </button>
-                </div>
             </div>
+
+            {/* Report Modal */}
+            {taskReport && (
+                <div className="fixed inset-0 z-[80] flex items-center justify-center p-4">
+                    <div className="absolute inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setTaskReport(null)}></div>
+                    <div className="relative w-full max-w-3xl bg-white rounded-2xl shadow-2xl border border-gray-200 overflow-hidden flex flex-col max-h-[80vh]">
+                        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+                            <div className="font-bold text-gray-900">分析报告 / 任务详情</div>
+                            <button onClick={() => setTaskReport(null)} className="text-gray-400 hover:text-gray-600">
+                                <X size={18} />
+                            </button>
+                        </div>
+                        <div className="p-6 overflow-y-auto">
+                            <div className="text-xs text-gray-500 mb-2">
+                                任务ID: <span className="font-mono text-gray-700">{taskReport.id}</span>
+                            </div>
+                            <div className="text-sm font-bold text-gray-900 mb-3">{taskReport.keyword}</div>
+                            <pre className="text-xs bg-gray-50 border border-gray-100 rounded-xl p-4 overflow-x-auto whitespace-pre-wrap">
+                                {JSON.stringify(taskReport.result || taskReport, null, 2)}
+                            </pre>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Run Detail Modal */}
+            {runDetail && (
+                <div className="fixed inset-0 z-[80] flex items-center justify-center p-4">
+                    <div className="absolute inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setRunDetail(null)}></div>
+                    <div className="relative w-full max-w-3xl bg-white rounded-2xl shadow-2xl border border-gray-200 overflow-hidden flex flex-col max-h-[80vh]">
+                        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+                            <div className="font-bold text-gray-900">调用详情</div>
+                            <button onClick={() => setRunDetail(null)} className="text-gray-400 hover:text-gray-600">
+                                <X size={18} />
+                            </button>
+                        </div>
+                        <div className="p-6 overflow-y-auto space-y-4">
+                            <div className="text-xs text-gray-500">
+                                RunID: <span className="font-mono text-gray-700">{runDetail.id}</span>
+                            </div>
+                            <div className="text-xs text-gray-500">
+                                任务: <span className="font-mono text-gray-700">{runDetail.taskId}</span>
+                            </div>
+                            <div className="grid grid-cols-2 gap-3 text-xs">
+                                <div className="p-3 rounded-xl border border-gray-100 bg-gray-50">
+                                    <div className="text-gray-500">模型源</div>
+                                    <div className="font-bold text-gray-900 mt-1">{runDetail.modelKey}</div>
+                                </div>
+                                <div className="p-3 rounded-xl border border-gray-100 bg-gray-50">
+                                    <div className="text-gray-500">状态</div>
+                                    <div className="font-bold text-gray-900 mt-1">{runDetail.status}</div>
+                                </div>
+                            </div>
+                            {runDetail.error && (
+                                <div className="p-3 rounded-xl border border-red-100 bg-red-50 text-xs text-red-700 whitespace-pre-wrap">
+                                    {runDetail.error}
+                                </div>
+                            )}
+                            {runDetail.prompt && (
+                                <div>
+                                    <div className="text-xs font-bold text-gray-600 mb-2">Prompt</div>
+                                    <pre className="text-xs bg-gray-50 border border-gray-100 rounded-xl p-4 overflow-x-auto whitespace-pre-wrap">
+                                        {runDetail.prompt}
+                                    </pre>
+                                </div>
+                            )}
+                            {(runDetail.responseText || runDetail.responseJson) && (
+                                <div>
+                                    <div className="text-xs font-bold text-gray-600 mb-2">Response</div>
+                                    <pre className="text-xs bg-gray-50 border border-gray-100 rounded-xl p-4 overflow-x-auto whitespace-pre-wrap">
+                                        {typeof runDetail.responseText === 'string'
+                                            ? runDetail.responseText
+                                            : JSON.stringify(runDetail.responseJson, null, 2)}
+                                    </pre>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };
@@ -576,11 +987,20 @@ const ApiLogDetailModal = ({ log, onClose }: { log: any, onClose: () => void }) 
 export const AdminPage = ({ onExit }: { onExit: () => void }) => {
     const [activeTab, setActiveTab] = useState<AdminTab>('overview');
     const [users, setUsers] = useState<any[]>([]);
+    const [usersTotal, setUsersTotal] = useState(0);
+    const [usersLoading, setUsersLoading] = useState(false);
     const [stats, setStats] = useState<any>(null);
     const [usersLoadError, setUsersLoadError] = useState('');
     const [selectedUser, setSelectedUser] = useState<any>(null);
     const [selectedLog, setSelectedLog] = useState<any>(null);
     const [isAddUserDrawerOpen, setIsAddUserDrawerOpen] = useState(false);
+
+    const [usersQ, setUsersQ] = useState('');
+    const [usersPlan, setUsersPlan] = useState<'ALL' | 'FREE' | 'PRO' | 'ENTERPRISE'>('ALL');
+    const [usersFrom, setUsersFrom] = useState('');
+    const [usersTo, setUsersTo] = useState('');
+    const [usersLimit, setUsersLimit] = useState(50);
+    const [usersOffset, setUsersOffset] = useState(0);
     
     // Fetch Data from Backend
     useEffect(() => {
@@ -589,26 +1009,6 @@ export const AdminPage = ({ onExit }: { onExit: () => void }) => {
             .then(res => res.json())
             .then(data => setStats(data))
             .catch(err => console.error("Failed to fetch stats", err));
-
-        // Fetch Users
-        apiFetch('/api/admin/users')
-            .then(async (res) => {
-                const data = await res.json().catch(() => null);
-                if (!res.ok) {
-                    const msg = (data && (data.error || data.message)) || `加载失败（HTTP ${res.status}）`;
-                    throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
-                }
-                return Array.isArray(data) ? data : [];
-            })
-            .then((data) => {
-                setUsersLoadError('');
-                setUsers(Array.isArray(data) ? data : []);
-            })
-            .catch((err) => {
-                console.error("Failed to fetch users", err);
-                setUsersLoadError(String(err?.message || err || '加载失败'));
-                setUsers([]);
-            });
     }, []);
 
     const [logView, setLogView] = useState<'audit' | 'traffic'>('audit');
@@ -616,6 +1016,80 @@ export const AdminPage = ({ onExit }: { onExit: () => void }) => {
     // New States
     const [selectedEngine, setSelectedEngine] = useState<any>(null);
     const [showNotifications, setShowNotifications] = useState(false);
+
+    // Global Task Records (All Users)
+    const [globalTasks, setGlobalTasks] = useState<any[]>([]);
+    const [globalTasksTotal, setGlobalTasksTotal] = useState(0);
+    const [globalTasksLoading, setGlobalTasksLoading] = useState(false);
+    const [globalTasksError, setGlobalTasksError] = useState('');
+    const [tasksQ, setTasksQ] = useState('');
+    const [tasksEmail, setTasksEmail] = useState('');
+    const [tasksModelKey, setTasksModelKey] = useState('');
+    const [tasksStatus, setTasksStatus] = useState<'ALL' | 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED'>('ALL');
+    const [tasksSearchType, setTasksSearchType] = useState<'ALL' | 'quick' | 'deep'>('ALL');
+    const [tasksFrom, setTasksFrom] = useState('');
+    const [tasksTo, setTasksTo] = useState('');
+    const [tasksLimit, setTasksLimit] = useState(100);
+    const [tasksOffset, setTasksOffset] = useState(0);
+
+    // Global Call Records (All Users)
+    const [globalRuns, setGlobalRuns] = useState<any[]>([]);
+    const [globalRunsTotal, setGlobalRunsTotal] = useState(0);
+    const [globalRunsLoading, setGlobalRunsLoading] = useState(false);
+    const [globalRunsError, setGlobalRunsError] = useState('');
+    const [callsQ, setCallsQ] = useState('');
+    const [callsEmail, setCallsEmail] = useState('');
+    const [callsModelKey, setCallsModelKey] = useState('');
+    const [callsPurpose, setCallsPurpose] = useState<'ALL' | 'MODEL' | 'ANALYSIS'>('ALL');
+    const [callsStatus, setCallsStatus] = useState<'ALL' | 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED'>('ALL');
+    const [callsFrom, setCallsFrom] = useState('');
+    const [callsTo, setCallsTo] = useState('');
+    const [callsLimit, setCallsLimit] = useState(100);
+    const [callsOffset, setCallsOffset] = useState(0);
+    const [globalRunDetail, setGlobalRunDetail] = useState<any>(null);
+    const [globalTaskDetail, setGlobalTaskDetail] = useState<any>(null);
+    const [globalDetailLoading, setGlobalDetailLoading] = useState(false);
+
+    // Global Billing Records (All Users)
+    const [globalPointsLogs, setGlobalPointsLogs] = useState<any[]>([]);
+    const [globalPointsTotal, setGlobalPointsTotal] = useState(0);
+    const [globalPointsLoading, setGlobalPointsLoading] = useState(false);
+    const [globalPointsError, setGlobalPointsError] = useState('');
+    const [pointsEmail, setPointsEmail] = useState('');
+    const [pointsQ, setPointsQ] = useState('');
+    const [pointsType, setPointsType] = useState<'ALL' | 'RECHARGE' | 'CONSUME' | 'ADMIN_ADD' | 'ADMIN_SUB' | 'REFUND'>('ALL');
+    const [pointsFrom, setPointsFrom] = useState('');
+    const [pointsTo, setPointsTo] = useState('');
+    const [pointsLimit, setPointsLimit] = useState(100);
+    const [pointsOffset, setPointsOffset] = useState(0);
+
+    // Global Page Views (All Users)
+    const [globalPageViews, setGlobalPageViews] = useState<any[]>([]);
+    const [globalPageViewsTotal, setGlobalPageViewsTotal] = useState(0);
+    const [globalPageViewsLoading, setGlobalPageViewsLoading] = useState(false);
+    const [globalPageViewsError, setGlobalPageViewsError] = useState('');
+    const [pageViewsEmail, setPageViewsEmail] = useState('');
+    const [pageViewsQ, setPageViewsQ] = useState('');
+    const [pageViewsFrom, setPageViewsFrom] = useState('');
+    const [pageViewsTo, setPageViewsTo] = useState('');
+    const [pageViewsLimit, setPageViewsLimit] = useState(100);
+    const [pageViewsOffset, setPageViewsOffset] = useState(0);
+
+    // Reports / Rankings
+    const [rankings, setRankings] = useState<any>(null);
+    const [rankingsLoading, setRankingsLoading] = useState(false);
+    const [rankingsError, setRankingsError] = useState('');
+    const [rankingsFrom, setRankingsFrom] = useState(() => {
+        const d = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000);
+        const pad = (n: number) => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    });
+    const [rankingsTo, setRankingsTo] = useState(() => {
+        const d = new Date();
+        const pad = (n: number) => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    });
+    const [rankingsLimit, setRankingsLimit] = useState(20);
 
     // Settings State
     const [maintenanceMode, setMaintenanceMode] = useState(false);
@@ -642,6 +1116,289 @@ export const AdminPage = ({ onExit }: { onExit: () => void }) => {
             console.error('Failed to patch system config', err);
         }
     };
+
+    const downloadCsv = async (url: string, filename: string) => {
+        try {
+            const res = await apiFetch(url);
+            if (!res.ok) {
+                const text = await res.text().catch(() => '');
+                throw new Error(text || `下载失败（HTTP ${res.status}）`);
+            }
+            const blob = await res.blob();
+            const href = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = href;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(href);
+        } catch (err: any) {
+            alert(`❌ 导出失败: ${err?.message || '未知错误'}`);
+        }
+    };
+
+    const fetchAdminUsers = async (opts?: { limit?: number; offset?: number }) => {
+        setUsersLoading(true);
+        setUsersLoadError('');
+        try {
+            const limit = opts?.limit ?? usersLimit;
+            const offset = opts?.offset ?? usersOffset;
+
+            const params = new URLSearchParams();
+            params.set('limit', String(limit));
+            params.set('offset', String(offset));
+            if (usersQ.trim()) params.set('q', usersQ.trim());
+            if (usersPlan !== 'ALL') params.set('plan', usersPlan);
+            if (usersFrom) params.set('from', usersFrom);
+            if (usersTo) params.set('to', usersTo);
+
+            const res = await apiFetch(`/api/admin/users?${params.toString()}`);
+            const data = await res.json().catch(() => null);
+            if (!res.ok) {
+                const msg = (data && (data.error || data.message)) || `加载失败（HTTP ${res.status}）`;
+                throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
+            }
+
+            setUsersTotal(Number(data?.total || 0));
+            setUsers(Array.isArray(data?.items) ? data.items : []);
+        } catch (err: any) {
+            console.error('Failed to fetch users', err);
+            setUsers([]);
+            setUsersTotal(0);
+            setUsersLoadError(String(err?.message || err || '加载失败'));
+        } finally {
+            setUsersLoading(false);
+        }
+    };
+
+    const fetchGlobalTasks = async (opts?: { limit?: number; offset?: number }) => {
+        setGlobalTasksLoading(true);
+        setGlobalTasksError('');
+        try {
+            const limit = opts?.limit ?? tasksLimit;
+            const offset = opts?.offset ?? tasksOffset;
+
+            const params = new URLSearchParams();
+            params.set('limit', String(limit));
+            params.set('offset', String(offset));
+            if (tasksQ.trim()) params.set('q', tasksQ.trim());
+            if (tasksEmail.trim()) params.set('email', tasksEmail.trim());
+            if (tasksModelKey.trim()) params.set('modelKey', tasksModelKey.trim());
+            if (tasksStatus !== 'ALL') params.set('status', tasksStatus);
+            if (tasksSearchType !== 'ALL') params.set('searchType', tasksSearchType);
+            if (tasksFrom) params.set('from', tasksFrom);
+            if (tasksTo) params.set('to', tasksTo);
+
+            const res = await apiFetch(`/api/admin/tasks?${params.toString()}`);
+            const data = await res.json().catch(() => null);
+            if (!res.ok) {
+                const msg = (data && (data.error || data.message)) || `加载失败（HTTP ${res.status}）`;
+                throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
+            }
+            setGlobalTasksTotal(Number(data?.total || 0));
+            setGlobalTasks(Array.isArray(data?.items) ? data.items : []);
+        } catch (err: any) {
+            console.error('Failed to fetch global tasks', err);
+            setGlobalTasks([]);
+            setGlobalTasksTotal(0);
+            setGlobalTasksError(String(err?.message || err || '加载失败'));
+        } finally {
+            setGlobalTasksLoading(false);
+        }
+    };
+
+    const fetchGlobalRuns = async (opts?: { limit?: number; offset?: number }) => {
+        setGlobalRunsLoading(true);
+        setGlobalRunsError('');
+        try {
+            const limit = opts?.limit ?? callsLimit;
+            const offset = opts?.offset ?? callsOffset;
+
+            const params = new URLSearchParams();
+            params.set('limit', String(limit));
+            params.set('offset', String(offset));
+            if (callsQ.trim()) params.set('q', callsQ.trim());
+            if (callsEmail.trim()) params.set('email', callsEmail.trim());
+            if (callsModelKey.trim()) params.set('modelKey', callsModelKey.trim());
+            if (callsPurpose !== 'ALL') params.set('purpose', callsPurpose);
+            if (callsStatus !== 'ALL') params.set('status', callsStatus);
+            if (callsFrom) params.set('from', callsFrom);
+            if (callsTo) params.set('to', callsTo);
+
+            const res = await apiFetch(`/api/admin/runs?${params.toString()}`);
+            const data = await res.json().catch(() => null);
+            if (!res.ok) {
+                const msg = (data && (data.error || data.message)) || `加载失败（HTTP ${res.status}）`;
+                throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
+            }
+            setGlobalRunsTotal(Number(data?.total || 0));
+            setGlobalRuns(Array.isArray(data?.items) ? data.items : []);
+        } catch (err: any) {
+            console.error('Failed to fetch global runs', err);
+            setGlobalRuns([]);
+            setGlobalRunsTotal(0);
+            setGlobalRunsError(String(err?.message || err || '加载失败'));
+        } finally {
+            setGlobalRunsLoading(false);
+        }
+    };
+
+    const fetchGlobalPointsLogs = async (opts?: { limit?: number; offset?: number }) => {
+        setGlobalPointsLoading(true);
+        setGlobalPointsError('');
+        try {
+            const limit = opts?.limit ?? pointsLimit;
+            const offset = opts?.offset ?? pointsOffset;
+
+            const params = new URLSearchParams();
+            params.set('limit', String(limit));
+            params.set('offset', String(offset));
+            if (pointsQ.trim()) params.set('q', pointsQ.trim());
+            if (pointsEmail.trim()) params.set('email', pointsEmail.trim());
+            if (pointsType !== 'ALL') params.set('type', pointsType);
+            if (pointsFrom) params.set('from', pointsFrom);
+            if (pointsTo) params.set('to', pointsTo);
+
+            const res = await apiFetch(`/api/admin/points-logs?${params.toString()}`);
+            const data = await res.json().catch(() => null);
+            if (!res.ok) {
+                const msg = (data && (data.error || data.message)) || `加载失败（HTTP ${res.status}）`;
+                throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
+            }
+            setGlobalPointsTotal(Number(data?.total || 0));
+            setGlobalPointsLogs(Array.isArray(data?.items) ? data.items : []);
+        } catch (err: any) {
+            console.error('Failed to fetch global points logs', err);
+            setGlobalPointsLogs([]);
+            setGlobalPointsTotal(0);
+            setGlobalPointsError(String(err?.message || err || '加载失败'));
+        } finally {
+            setGlobalPointsLoading(false);
+        }
+    };
+
+    const fetchGlobalPageViews = async (opts?: { limit?: number; offset?: number }) => {
+        setGlobalPageViewsLoading(true);
+        setGlobalPageViewsError('');
+        try {
+            const limit = opts?.limit ?? pageViewsLimit;
+            const offset = opts?.offset ?? pageViewsOffset;
+
+            const params = new URLSearchParams();
+            params.set('limit', String(limit));
+            params.set('offset', String(offset));
+            if (pageViewsQ.trim()) params.set('q', pageViewsQ.trim());
+            if (pageViewsEmail.trim()) params.set('email', pageViewsEmail.trim());
+            if (pageViewsFrom) params.set('from', pageViewsFrom);
+            if (pageViewsTo) params.set('to', pageViewsTo);
+
+            const res = await apiFetch(`/api/admin/pageviews?${params.toString()}`);
+            const data = await res.json().catch(() => null);
+            if (!res.ok) {
+                const msg = (data && (data.error || data.message)) || `加载失败（HTTP ${res.status}）`;
+                throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
+            }
+            setGlobalPageViewsTotal(Number(data?.total || 0));
+            setGlobalPageViews(Array.isArray(data?.items) ? data.items : []);
+        } catch (err: any) {
+            console.error('Failed to fetch global pageviews', err);
+            setGlobalPageViews([]);
+            setGlobalPageViewsTotal(0);
+            setGlobalPageViewsError(String(err?.message || err || '加载失败'));
+        } finally {
+            setGlobalPageViewsLoading(false);
+        }
+    };
+
+    const fetchRankings = async () => {
+        setRankingsLoading(true);
+        setRankingsError('');
+        try {
+            const params = new URLSearchParams();
+            params.set('limit', String(rankingsLimit));
+            if (rankingsFrom) params.set('from', rankingsFrom);
+            if (rankingsTo) params.set('to', rankingsTo);
+
+            const res = await apiFetch(`/api/admin/rankings?${params.toString()}`);
+            const data = await res.json().catch(() => null);
+            if (!res.ok) {
+                const msg = (data && (data.error || data.message)) || `加载失败（HTTP ${res.status}）`;
+                throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
+            }
+            setRankings(data);
+        } catch (err: any) {
+            console.error('Failed to fetch rankings', err);
+            setRankings(null);
+            setRankingsError(String(err?.message || err || '加载失败'));
+        } finally {
+            setRankingsLoading(false);
+        }
+    };
+
+    const openGlobalRunDetail = async (runId: string) => {
+        setGlobalDetailLoading(true);
+        try {
+            const res = await apiFetch(`/api/admin/runs/${runId}`);
+            const data = await res.json().catch(() => null);
+            if (!res.ok) throw new Error((data && (data.error || data.message)) || '获取失败');
+            setGlobalRunDetail(data);
+        } catch (err: any) {
+            alert(`❌ 获取调用详情失败: ${err?.message || '未知错误'}`);
+        } finally {
+            setGlobalDetailLoading(false);
+        }
+    };
+
+    const openGlobalTaskDetail = async (taskId: string) => {
+        setGlobalDetailLoading(true);
+        try {
+            const res = await apiFetch(`/api/admin/tasks/${taskId}`);
+            const data = await res.json().catch(() => null);
+            if (!res.ok) throw new Error((data && (data.error || data.message)) || '获取失败');
+            setGlobalTaskDetail(data);
+        } catch (err: any) {
+            alert(`❌ 获取任务详情失败: ${err?.message || '未知错误'}`);
+        } finally {
+            setGlobalDetailLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        if (activeTab !== 'users') return;
+        fetchAdminUsers();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [activeTab]);
+
+    useEffect(() => {
+        if (activeTab !== 'calls') return;
+        fetchGlobalRuns();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [activeTab]);
+
+    useEffect(() => {
+        if (activeTab !== 'tasks') return;
+        fetchGlobalTasks();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [activeTab]);
+
+    useEffect(() => {
+        if (activeTab !== 'billing') return;
+        fetchGlobalPointsLogs();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [activeTab]);
+
+    useEffect(() => {
+        if (activeTab !== 'pageviews') return;
+        fetchGlobalPageViews();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [activeTab]);
+
+    useEffect(() => {
+        if (activeTab !== 'reports') return;
+        fetchRankings();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [activeTab]);
 
     const renderContent = () => {
         switch (activeTab) {
@@ -740,28 +1497,518 @@ export const AdminPage = ({ onExit }: { onExit: () => void }) => {
                         </div>
                     </div>
                 );
-            case 'users':
+            case 'reports':
                 return (
-                    <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden animate-slide-up relative min-h-[700px] h-full flex flex-col">
-                        <div className="p-6 border-b border-gray-100 flex justify-between items-center">
-                            <h3 className="font-bold text-gray-900">用户管理</h3>
-                            <div className="flex gap-2">
-                                <div className="relative">
-                                    <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-                                    <input type="text" placeholder="搜索用户..." className="pl-9 pr-4 py-2 border border-gray-200 rounded-lg text-sm outline-none focus:border-brand-purple w-64" />
+                    <div className="space-y-6 animate-fade-in">
+                        <div className="flex items-center justify-between">
+                            <div>
+                                <h3 className="text-lg font-bold text-gray-900">统计排行</h3>
+                                <p className="text-sm text-gray-500">浏览时长 / 扣费 / 模型调用排行（支持时间筛选与导出）。</p>
+                            </div>
+                            <button
+                                onClick={fetchRankings}
+                                disabled={rankingsLoading}
+                                className="flex items-center gap-2 text-sm text-brand-purple font-bold hover:bg-purple-50 px-3 py-2 rounded-xl transition-colors border border-transparent hover:border-purple-100 disabled:opacity-60"
+                            >
+                                <RefreshCw size={14} className={rankingsLoading ? 'animate-spin' : ''} /> 刷新
+                            </button>
+                        </div>
+
+                        <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-4">
+                            <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
+                                <div className="md:col-span-2">
+                                    <label className="block text-xs font-bold text-gray-700 mb-1">开始日期</label>
+                                    <input
+                                        type="date"
+                                        value={rankingsFrom}
+                                        onChange={(e) => setRankingsFrom(e.target.value)}
+                                        className="w-full px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm outline-none focus:border-brand-purple focus:ring-2 focus:ring-purple-50"
+                                    />
                                 </div>
-                                <button 
-                                    onClick={() => setIsAddUserDrawerOpen(true)}
-                                    className="bg-brand-purple text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm hover:bg-brand-hover"
+                                <div className="md:col-span-2">
+                                    <label className="block text-xs font-bold text-gray-700 mb-1">结束日期</label>
+                                    <input
+                                        type="date"
+                                        value={rankingsTo}
+                                        onChange={(e) => setRankingsTo(e.target.value)}
+                                        className="w-full px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm outline-none focus:border-brand-purple focus:ring-2 focus:ring-purple-50"
+                                    />
+                                </div>
+                                <div className="md:col-span-2">
+                                    <label className="block text-xs font-bold text-gray-700 mb-1">Top N</label>
+                                    <select
+                                        value={rankingsLimit}
+                                        onChange={(e) => setRankingsLimit(Number.parseInt(e.target.value, 10) || 20)}
+                                        className="w-full px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm outline-none focus:border-brand-purple focus:ring-2 focus:ring-purple-50"
+                                    >
+                                        {[10, 20, 50, 100].map((n) => (
+                                            <option key={n} value={n}>
+                                                {n}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div className="mt-3 flex items-center justify-between gap-3">
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <button
+                                        onClick={() => {
+                                            const d = new Date();
+                                            const pad = (n: number) => String(n).padStart(2, '0');
+                                            const s = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+                                            setRankingsFrom(s);
+                                            setRankingsTo(s);
+                                        }}
+                                        className="px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-xs font-bold text-gray-700 hover:bg-gray-50"
+                                    >
+                                        今天
+                                    </button>
+                                    <button
+                                        onClick={() => {
+                                            const now = new Date();
+                                            const from = new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000);
+                                            const pad = (n: number) => String(n).padStart(2, '0');
+                                            const f = `${from.getFullYear()}-${pad(from.getMonth() + 1)}-${pad(from.getDate())}`;
+                                            const t = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+                                            setRankingsFrom(f);
+                                            setRankingsTo(t);
+                                        }}
+                                        className="px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-xs font-bold text-gray-700 hover:bg-gray-50"
+                                    >
+                                        近 7 天
+                                    </button>
+                                    <button
+                                        onClick={() => {
+                                            const now = new Date();
+                                            const from = new Date(now.getTime() - 29 * 24 * 60 * 60 * 1000);
+                                            const pad = (n: number) => String(n).padStart(2, '0');
+                                            const f = `${from.getFullYear()}-${pad(from.getMonth() + 1)}-${pad(from.getDate())}`;
+                                            const t = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+                                            setRankingsFrom(f);
+                                            setRankingsTo(t);
+                                        }}
+                                        className="px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-xs font-bold text-gray-700 hover:bg-gray-50"
+                                    >
+                                        近 30 天
+                                    </button>
+                                    <button
+                                        onClick={() => {
+                                            setRankingsFrom('');
+                                            setRankingsTo('');
+                                        }}
+                                        className="px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-xs font-bold text-gray-700 hover:bg-gray-50"
+                                    >
+                                        全部
+                                    </button>
+                                </div>
+                                <button
+                                    onClick={fetchRankings}
+                                    disabled={rankingsLoading}
+                                    className="px-4 py-2 rounded-xl bg-gray-900 text-white text-sm font-bold hover:bg-gray-800 transition-colors disabled:opacity-60"
                                 >
-                                    添加用户
+                                    查询
                                 </button>
                             </div>
+
+                            {rankingsError && (
+                                <div className="mt-3 bg-red-50 border border-red-100 text-red-700 text-xs rounded-lg px-4 py-3">
+                                    {rankingsError}
+                                </div>
+                            )}
                         </div>
-                        <div className="flex-1 overflow-auto">
-                            <table className="w-full text-sm text-left">
-                                <thead className="bg-gray-50 text-gray-500 font-medium sticky top-0 z-10 shadow-sm">
-                                <tr>
+
+                        {/* Browsing Ranking */}
+                        <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
+                            <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
+                                <div>
+                                    <div className="text-sm font-bold text-gray-900">浏览时长排行</div>
+                                    <div className="text-xs text-gray-500 mt-0.5">按累计停留时长排序</div>
+                                </div>
+                                <button
+                                    onClick={() => {
+                                        const params = new URLSearchParams();
+                                        params.set('kind', 'browsing');
+                                        params.set('limit', '5000');
+                                        if (rankingsFrom) params.set('from', rankingsFrom);
+                                        if (rankingsTo) params.set('to', rankingsTo);
+                                        downloadCsv(`/api/admin/export/rankings.csv?${params.toString()}`, `ranking_browsing_${Date.now()}.csv`);
+                                    }}
+                                    className="px-4 py-2 rounded-xl text-sm font-bold border border-gray-200 bg-white hover:bg-gray-50 transition-colors"
+                                >
+                                    导出 CSV
+                                </button>
+                            </div>
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-sm">
+                                    <thead className="bg-gray-50 border-b border-gray-100 text-xs text-gray-500 uppercase tracking-wider">
+                                        <tr>
+                                            <th className="px-4 py-3 text-left">排名</th>
+                                            <th className="px-4 py-3 text-left">用户</th>
+                                            <th className="px-4 py-3 text-left">套餐</th>
+                                            <th className="px-4 py-3 text-left">浏览时长</th>
+                                            <th className="px-4 py-3 text-left">访问次数</th>
+                                            <th className="px-4 py-3 text-left">最近活跃</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-gray-100">
+                                        {rankingsLoading ? (
+                                            <tr>
+                                                <td colSpan={6} className="px-4 py-8 text-center text-gray-400">
+                                                    <RefreshCw size={16} className="inline-block mr-2 animate-spin" />
+                                                    加载中...
+                                                </td>
+                                            </tr>
+                                        ) : (rankings?.browsing || []).length === 0 ? (
+                                            <tr>
+                                                <td colSpan={6} className="px-4 py-10 text-center text-gray-400">
+                                                    暂无数据
+                                                </td>
+                                            </tr>
+                                        ) : (
+                                            (rankings?.browsing || []).map((r: any, idx: number) => (
+                                                <tr key={r.userId} className="hover:bg-gray-50 transition-colors">
+                                                    <td className="px-4 py-3 text-xs font-bold text-gray-700 tabular-nums">#{idx + 1}</td>
+                                                    <td className="px-4 py-3">
+                                                        <div className="text-xs font-bold text-gray-900">{r.user?.email || '-'}</div>
+                                                        <div className="text-[10px] text-gray-400">ID: {r.userId}</div>
+                                                    </td>
+                                                    <td className="px-4 py-3 text-xs font-bold">{r.user?.plan || 'FREE'}</td>
+                                                    <td className="px-4 py-3 text-xs text-gray-700 tabular-nums whitespace-nowrap">
+                                                        {formatDurationSeconds(r.durationSeconds || 0)}
+                                                    </td>
+                                                    <td className="px-4 py-3 text-xs text-gray-700 tabular-nums whitespace-nowrap">{r.pageViews || 0}</td>
+                                                    <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">
+                                                        {r.lastActiveAt ? new Date(r.lastActiveAt).toLocaleString() : '-'}
+                                                    </td>
+                                                </tr>
+                                            ))
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        {/* Billing Ranking */}
+                        <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
+                            <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
+                                <div>
+                                    <div className="text-sm font-bold text-gray-900">扣费排行</div>
+                                    <div className="text-xs text-gray-500 mt-0.5">按点数扣费（pointsUnits）排序</div>
+                                </div>
+                                <button
+                                    onClick={() => {
+                                        const params = new URLSearchParams();
+                                        params.set('kind', 'billing');
+                                        params.set('limit', '5000');
+                                        if (rankingsFrom) params.set('from', rankingsFrom);
+                                        if (rankingsTo) params.set('to', rankingsTo);
+                                        downloadCsv(`/api/admin/export/rankings.csv?${params.toString()}`, `ranking_billing_${Date.now()}.csv`);
+                                    }}
+                                    className="px-4 py-2 rounded-xl text-sm font-bold border border-gray-200 bg-white hover:bg-gray-50 transition-colors"
+                                >
+                                    导出 CSV
+                                </button>
+                            </div>
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-sm">
+                                    <thead className="bg-gray-50 border-b border-gray-100 text-xs text-gray-500 uppercase tracking-wider">
+                                        <tr>
+                                            <th className="px-4 py-3 text-left">排名</th>
+                                            <th className="px-4 py-3 text-left">用户</th>
+                                            <th className="px-4 py-3 text-left">套餐</th>
+                                            <th className="px-4 py-3 text-left">任务数</th>
+                                            <th className="px-4 py-3 text-left">成本</th>
+                                            <th className="px-4 py-3 text-left">扣点</th>
+                                            <th className="px-4 py-3 text-left">最近任务</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-gray-100">
+                                        {rankingsLoading ? (
+                                            <tr>
+                                                <td colSpan={7} className="px-4 py-8 text-center text-gray-400">
+                                                    <RefreshCw size={16} className="inline-block mr-2 animate-spin" />
+                                                    加载中...
+                                                </td>
+                                            </tr>
+                                        ) : (rankings?.billing || []).length === 0 ? (
+                                            <tr>
+                                                <td colSpan={7} className="px-4 py-10 text-center text-gray-400">
+                                                    暂无数据
+                                                </td>
+                                            </tr>
+                                        ) : (
+                                            (rankings?.billing || []).map((r: any, idx: number) => (
+                                                <tr key={r.userId} className="hover:bg-gray-50 transition-colors">
+                                                    <td className="px-4 py-3 text-xs font-bold text-gray-700 tabular-nums">#{idx + 1}</td>
+                                                    <td className="px-4 py-3">
+                                                        <div className="text-xs font-bold text-gray-900">{r.user?.email || '-'}</div>
+                                                        <div className="text-[10px] text-gray-400">ID: {r.userId}</div>
+                                                    </td>
+                                                    <td className="px-4 py-3 text-xs font-bold">{r.user?.plan || 'FREE'}</td>
+                                                    <td className="px-4 py-3 text-xs text-gray-700 tabular-nums whitespace-nowrap">{r.tasks || 0}</td>
+                                                    <td className="px-4 py-3 text-xs text-gray-700 tabular-nums whitespace-nowrap">
+                                                        {r.costUnits}（免费 {r.quotaUnits} / 点数 {r.pointsUnits}）
+                                                    </td>
+                                                    <td className="px-4 py-3 text-xs font-bold tabular-nums whitespace-nowrap text-red-600">
+                                                        {r.pointsUnits || 0}
+                                                    </td>
+                                                    <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">
+                                                        {r.lastTaskAt ? new Date(r.lastTaskAt).toLocaleString() : '-'}
+                                                    </td>
+                                                </tr>
+                                            ))
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        {/* Model Usage Ranking */}
+                        <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
+                            <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
+                                <div>
+                                    <div className="text-sm font-bold text-gray-900">模型调用排行</div>
+                                    <div className="text-xs text-gray-500 mt-0.5">按调用次数排序（含模型调用 + 深度分析）</div>
+                                </div>
+                                <button
+                                    onClick={() => {
+                                        const params = new URLSearchParams();
+                                        params.set('kind', 'models');
+                                        params.set('limit', '5000');
+                                        if (rankingsFrom) params.set('from', rankingsFrom);
+                                        if (rankingsTo) params.set('to', rankingsTo);
+                                        downloadCsv(`/api/admin/export/rankings.csv?${params.toString()}`, `ranking_models_${Date.now()}.csv`);
+                                    }}
+                                    className="px-4 py-2 rounded-xl text-sm font-bold border border-gray-200 bg-white hover:bg-gray-50 transition-colors"
+                                >
+                                    导出 CSV
+                                </button>
+                            </div>
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-sm">
+                                    <thead className="bg-gray-50 border-b border-gray-100 text-xs text-gray-500 uppercase tracking-wider">
+                                        <tr>
+                                            <th className="px-4 py-3 text-left">排名</th>
+                                            <th className="px-4 py-3 text-left">模型源</th>
+                                            <th className="px-4 py-3 text-left">总次数</th>
+                                            <th className="px-4 py-3 text-left">模型</th>
+                                            <th className="px-4 py-3 text-left">分析</th>
+                                            <th className="px-4 py-3 text-left">成功</th>
+                                            <th className="px-4 py-3 text-left">失败</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-gray-100">
+                                        {rankingsLoading ? (
+                                            <tr>
+                                                <td colSpan={7} className="px-4 py-8 text-center text-gray-400">
+                                                    <RefreshCw size={16} className="inline-block mr-2 animate-spin" />
+                                                    加载中...
+                                                </td>
+                                            </tr>
+                                        ) : (rankings?.models || []).length === 0 ? (
+                                            <tr>
+                                                <td colSpan={7} className="px-4 py-10 text-center text-gray-400">
+                                                    暂无数据
+                                                </td>
+                                            </tr>
+                                        ) : (
+                                            (rankings?.models || []).map((r: any, idx: number) => (
+                                                <tr key={r.modelKey} className="hover:bg-gray-50 transition-colors">
+                                                    <td className="px-4 py-3 text-xs font-bold text-gray-700 tabular-nums">#{idx + 1}</td>
+                                                    <td className="px-4 py-3">
+                                                        <div className="text-xs font-bold text-gray-900">{r.modelKey}</div>
+                                                    </td>
+                                                    <td className="px-4 py-3 text-xs font-bold tabular-nums whitespace-nowrap">{r.totalRuns || 0}</td>
+                                                    <td className="px-4 py-3 text-xs text-gray-700 tabular-nums whitespace-nowrap">{r.modelRuns || 0}</td>
+                                                    <td className="px-4 py-3 text-xs text-gray-700 tabular-nums whitespace-nowrap">{r.analysisRuns || 0}</td>
+                                                    <td className="px-4 py-3 text-xs font-bold tabular-nums whitespace-nowrap text-green-700">{r.succeeded || 0}</td>
+                                                    <td className="px-4 py-3 text-xs font-bold tabular-nums whitespace-nowrap text-red-600">{r.failed || 0}</td>
+                                                </tr>
+                                            ))
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                );
+	            case 'users':
+	                return (
+	                    <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden animate-slide-up relative min-h-[700px] h-full flex flex-col">
+	                        <div className="p-6 border-b border-gray-100 flex justify-between items-start">
+	                            <div>
+	                                <h3 className="font-bold text-gray-900">用户管理</h3>
+	                                <div className="text-xs text-gray-500 mt-1">支持筛选、分页、导出；点击用户可查看完整行为与计费明细。</div>
+	                                <div className="text-[11px] text-gray-400 mt-1 tabular-nums">共 {usersTotal.toLocaleString()} 条</div>
+	                            </div>
+	                            <div className="flex gap-2">
+	                                <button
+	                                    onClick={() => {
+	                                        const params = new URLSearchParams();
+	                                        params.set('limit', '5000');
+	                                        if (usersQ.trim()) params.set('q', usersQ.trim());
+	                                        if (usersPlan !== 'ALL') params.set('plan', usersPlan);
+	                                        if (usersFrom) params.set('from', usersFrom);
+	                                        if (usersTo) params.set('to', usersTo);
+	                                        downloadCsv(`/api/admin/export/users.csv?${params.toString()}`, `users_${Date.now()}.csv`);
+	                                    }}
+	                                    className="px-4 py-2 rounded-lg text-sm font-bold border border-gray-200 bg-white hover:bg-gray-50 transition-colors"
+	                                >
+	                                    导出 CSV
+	                                </button>
+	                                <button
+	                                    onClick={fetchAdminUsers}
+	                                    disabled={usersLoading}
+	                                    className="flex items-center gap-2 text-sm text-brand-purple font-bold hover:bg-purple-50 px-3 py-2 rounded-lg transition-colors border border-transparent hover:border-purple-100 disabled:opacity-60"
+	                                >
+	                                    <RefreshCw size={14} className={usersLoading ? 'animate-spin' : ''} /> 刷新
+	                                </button>
+	                                <button
+	                                    onClick={() => setIsAddUserDrawerOpen(true)}
+	                                    className="bg-brand-purple text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm hover:bg-brand-hover"
+	                                >
+	                                    添加用户
+	                                </button>
+	                            </div>
+	                        </div>
+
+	                        <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
+	                            <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
+	                                <div className="md:col-span-3">
+	                                    <label className="block text-xs font-bold text-gray-700 mb-1">关键词（姓名/邮箱）</label>
+	                                    <div className="flex items-center gap-2 bg-white border border-gray-200 rounded-xl px-3 py-2">
+	                                        <Search size={14} className="text-gray-400" />
+	                                        <input
+	                                            value={usersQ}
+	                                            onChange={(e) => setUsersQ(e.target.value)}
+	                                            placeholder="例如：张三 / user@example.com"
+	                                            className="w-full bg-transparent outline-none text-sm"
+	                                        />
+	                                    </div>
+	                                </div>
+	                                <div className="md:col-span-1">
+	                                    <label className="block text-xs font-bold text-gray-700 mb-1">套餐</label>
+	                                    <select
+	                                        value={usersPlan}
+	                                        onChange={(e) => setUsersPlan(e.target.value as any)}
+	                                        className="w-full px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm outline-none focus:border-brand-purple focus:ring-2 focus:ring-purple-50"
+	                                    >
+	                                        <option value="ALL">全部</option>
+	                                        <option value="FREE">免费版</option>
+	                                        <option value="PRO">开发者版</option>
+	                                        <option value="ENTERPRISE">企业版</option>
+	                                    </select>
+	                                </div>
+	                                <div className="md:col-span-1">
+	                                    <label className="block text-xs font-bold text-gray-700 mb-1">开始日期</label>
+	                                    <input
+	                                        type="date"
+	                                        value={usersFrom}
+	                                        onChange={(e) => setUsersFrom(e.target.value)}
+	                                        className="w-full px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm outline-none focus:border-brand-purple focus:ring-2 focus:ring-purple-50"
+	                                    />
+	                                </div>
+	                                <div className="md:col-span-1">
+	                                    <label className="block text-xs font-bold text-gray-700 mb-1">结束日期</label>
+	                                    <input
+	                                        type="date"
+	                                        value={usersTo}
+	                                        onChange={(e) => setUsersTo(e.target.value)}
+	                                        className="w-full px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm outline-none focus:border-brand-purple focus:ring-2 focus:ring-purple-50"
+	                                    />
+	                                </div>
+	                            </div>
+
+	                            <div className="mt-3 grid grid-cols-1 md:grid-cols-6 gap-3">
+	                                <div className="md:col-span-1">
+	                                    <label className="block text-xs font-bold text-gray-700 mb-1">每页</label>
+	                                    <select
+	                                        value={usersLimit}
+	                                        onChange={(e) => {
+	                                            const next = Number.parseInt(e.target.value, 10) || 50;
+	                                            setUsersLimit(next);
+	                                            setUsersOffset(0);
+	                                            fetchAdminUsers({ limit: next, offset: 0 });
+	                                        }}
+	                                        className="w-full px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm outline-none focus:border-brand-purple focus:ring-2 focus:ring-purple-50"
+	                                    >
+	                                        {[20, 50, 100].map((n) => (
+	                                            <option key={n} value={n}>
+	                                                {n}
+	                                            </option>
+	                                        ))}
+	                                    </select>
+	                                </div>
+	                                <div className="md:col-span-1 flex items-end gap-2">
+	                                    <button
+	                                        onClick={() => {
+	                                            const next = Math.max(0, usersOffset - usersLimit);
+	                                            setUsersOffset(next);
+	                                            fetchAdminUsers({ offset: next });
+	                                        }}
+	                                        disabled={usersLoading || usersOffset <= 0}
+	                                        className="flex-1 px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm font-bold hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+	                                    >
+	                                        上一页
+	                                    </button>
+	                                    <button
+	                                        onClick={() => {
+	                                            const next = usersOffset + usersLimit;
+	                                            setUsersOffset(next);
+	                                            fetchAdminUsers({ offset: next });
+	                                        }}
+	                                        disabled={usersLoading || usersOffset + usersLimit >= usersTotal}
+	                                        className="flex-1 px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm font-bold hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+	                                    >
+	                                        下一页
+	                                    </button>
+	                                </div>
+	                            </div>
+
+	                            <div className="mt-4 flex items-center justify-between">
+	                                <div className="text-xs text-gray-500 tabular-nums">
+	                                    {usersLoadError ? (
+	                                        <span className="text-red-600 font-bold">加载失败：{usersLoadError}</span>
+	                                    ) : (
+	                                        <span>
+	                                            共 {usersTotal.toLocaleString()} 条 · 第 {Math.floor(usersOffset / usersLimit) + 1} /{' '}
+	                                            {Math.max(1, Math.ceil(usersTotal / usersLimit))} 页
+	                                        </span>
+	                                    )}
+	                                </div>
+	                                <div className="flex items-center gap-2">
+	                                    <button
+	                                        onClick={() => {
+	                                            setUsersQ('');
+	                                            setUsersPlan('ALL');
+	                                            setUsersFrom('');
+	                                            setUsersTo('');
+	                                            setUsersOffset(0);
+	                                            fetchAdminUsers({ offset: 0 });
+	                                        }}
+	                                        disabled={usersLoading}
+	                                        className="px-4 py-2 rounded-xl border border-gray-200 bg-white text-sm font-bold hover:bg-gray-50 disabled:opacity-60"
+	                                    >
+	                                        重置
+	                                    </button>
+	                                    <button
+	                                        onClick={() => {
+	                                            setUsersOffset(0);
+	                                            fetchAdminUsers({ offset: 0 });
+	                                        }}
+	                                        disabled={usersLoading}
+	                                        className="bg-brand-purple text-white px-5 py-2 rounded-xl text-sm font-bold shadow-lg shadow-purple-200 hover:bg-brand-hover active:scale-95 transition-all disabled:opacity-60"
+	                                    >
+	                                        查询
+	                                    </button>
+	                                </div>
+	                            </div>
+	                        </div>
+	                        <div className="flex-1 overflow-auto">
+	                            <table className="w-full text-sm text-left">
+	                                <thead className="bg-gray-50 text-gray-500 font-medium sticky top-0 z-10 shadow-sm">
+	                                <tr>
                                     <th className="px-6 py-4">用户</th>
                                     <th className="px-6 py-4">状态</th>
                                     <th className="px-6 py-4">套餐计划</th>
@@ -770,32 +2017,38 @@ export const AdminPage = ({ onExit }: { onExit: () => void }) => {
                                     <th className="px-6 py-4">总消费</th>
                                     <th className="px-6 py-4 text-right">操作</th>
                                 </tr>
-                            </thead>
-                            <tbody className="divide-y divide-gray-100">
-                                {usersLoadError && (
-                                    <tr>
-                                        <td className="px-6 py-6 text-center text-sm text-red-600" colSpan={7}>
-                                            用户列表加载失败：{usersLoadError}
-                                        </td>
-                                    </tr>
-                                )}
-                                {users.length === 0 && (
-                                    <tr>
-                                        <td className="px-6 py-10 text-center text-sm text-gray-400" colSpan={7}>
-                                            暂无用户数据（请确认后端已启动，并使用管理员账号登录后台）
-                                        </td>
-                                    </tr>
-                                )}
-                                {users.map((user) => (
-                                    <tr 
-                                        key={user.id} 
-                                        className={`hover:bg-purple-50/50 transition-colors cursor-pointer ${selectedUser?.id === user.id ? 'bg-purple-50' : ''}`}
-                                        onClick={() => setSelectedUser(user)}
-                                    >
-                                        <td className="px-6 py-4">
-                                            <div className="flex items-center gap-3">
-                                                <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center font-bold text-gray-500 text-xs">
-                                                    {(user.name || user.email || 'U').charAt(0)}
+	                            </thead>
+	                            <tbody className="divide-y divide-gray-100">
+	                                {usersLoadError ? (
+	                                    <tr>
+	                                        <td className="px-6 py-10 text-center text-sm text-red-600" colSpan={7}>
+	                                            用户列表加载失败：{usersLoadError}
+	                                        </td>
+	                                    </tr>
+	                                ) : usersLoading ? (
+	                                    <tr>
+	                                        <td className="px-6 py-10 text-center text-sm text-gray-400" colSpan={7}>
+	                                            <RefreshCw size={16} className="inline-block mr-2 animate-spin" />
+	                                            加载中...
+	                                        </td>
+	                                    </tr>
+	                                ) : users.length === 0 ? (
+	                                    <tr>
+	                                        <td className="px-6 py-10 text-center text-sm text-gray-400" colSpan={7}>
+	                                            暂无用户数据
+	                                        </td>
+	                                    </tr>
+	                                ) : (
+	                                    users.map((user) => (
+	                                        <tr
+	                                            key={user.id}
+	                                            className={`hover:bg-purple-50/50 transition-colors cursor-pointer ${selectedUser?.id === user.id ? 'bg-purple-50' : ''}`}
+	                                            onClick={() => setSelectedUser(user)}
+	                                        >
+	                                        <td className="px-6 py-4">
+	                                            <div className="flex items-center gap-3">
+	                                                <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center font-bold text-gray-500 text-xs">
+	                                                    {(user.name || user.email || 'U').charAt(0)}
                                                 </div>
                                                 <div>
                                                     <div className="font-bold text-gray-900">{user.name || 'Unknown User'}</div>
@@ -827,28 +2080,31 @@ export const AdminPage = ({ onExit }: { onExit: () => void }) => {
                                             <button className="text-gray-400 hover:text-brand-purple p-2 hover:bg-gray-100 rounded-lg transition-all">
                                                 <Eye size={16} />
                                             </button>
-                                            <button 
-                                                onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    if(confirm("确定要删除该用户吗？")) {
-                                                        apiFetch(`/api/admin/users/${user.id}`, { method: 'DELETE' })
-                                                            .then((res) => {
-                                                                if (!res.ok) throw new Error('删除失败');
-                                                                setUsers(prev => prev.filter(u => u.id !== user.id));
-                                                            })
-                                                            .catch((err) => alert(err?.message || '删除失败'));
-                                                    }
-                                                }}
-                                                className="text-gray-400 hover:text-red-500 p-2 hover:bg-red-50 rounded-lg transition-all"
+	                                            <button 
+	                                                onClick={(e) => {
+	                                                    e.stopPropagation();
+	                                                    if(confirm("确定要删除该用户吗？")) {
+	                                                        apiFetch(`/api/admin/users/${user.id}`, { method: 'DELETE' })
+	                                                            .then((res) => {
+	                                                                if (!res.ok) throw new Error('删除失败');
+	                                                                if (selectedUser?.id === user.id) setSelectedUser(null);
+	                                                                setUsersOffset(0);
+	                                                                fetchAdminUsers({ offset: 0 });
+	                                                            })
+	                                                            .catch((err) => alert(err?.message || '删除失败'));
+	                                                    }
+	                                                }}
+	                                                className="text-gray-400 hover:text-red-500 p-2 hover:bg-red-50 rounded-lg transition-all"
                                             >
                                                 <LogOut size={16} />
-                                            </button>
-                                        </td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                            </table>
-                        </div>
+	                                            </button>
+	                                        </td>
+	                                        </tr>
+	                                    ))
+	                                )}
+	                            </tbody>
+	                            </table>
+	                        </div>
                         
                         {/* Drawer Overlay */}
                         {selectedUser && (
@@ -867,15 +2123,326 @@ export const AdminPage = ({ onExit }: { onExit: () => void }) => {
                             />
                         )}
                         
-                        {/* Add User Drawer */}
-                        <AddUserDrawer 
-                            isOpen={isAddUserDrawerOpen} 
-                            onClose={() => setIsAddUserDrawerOpen(false)}
-                            onSuccess={() => {
-                                // Refresh user list
-                                apiFetch('/api/admin/users').then(r => r.json()).then(setUsers);
-                            }}
-                        />
+	                        {/* Add User Drawer */}
+	                        <AddUserDrawer 
+	                            isOpen={isAddUserDrawerOpen} 
+	                            onClose={() => setIsAddUserDrawerOpen(false)}
+	                            onSuccess={() => {
+	                                setUsersOffset(0);
+	                                fetchAdminUsers({ offset: 0 });
+	                            }}
+	                        />
+	                    </div>
+	                );
+            case 'tasks':
+                return (
+                    <div className="space-y-5 animate-fade-in">
+                        <div className="flex items-center justify-between">
+                            <div>
+                                <h3 className="text-lg font-bold text-gray-900">全站任务记录</h3>
+                                <p className="text-sm text-gray-500">展示所有用户的任务、结果摘要与计费信息，可检索与导出。</p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <button
+                                    onClick={() => {
+                                        const params = new URLSearchParams();
+                                        params.set('limit', '5000');
+                                        if (tasksQ.trim()) params.set('q', tasksQ.trim());
+                                        if (tasksEmail.trim()) params.set('email', tasksEmail.trim());
+                                        if (tasksModelKey.trim()) params.set('modelKey', tasksModelKey.trim());
+                                        if (tasksStatus !== 'ALL') params.set('status', tasksStatus);
+                                        if (tasksSearchType !== 'ALL') params.set('searchType', tasksSearchType);
+                                        if (tasksFrom) params.set('from', tasksFrom);
+                                        if (tasksTo) params.set('to', tasksTo);
+                                        downloadCsv(`/api/admin/export/tasks.csv?${params.toString()}`, `tasks_${Date.now()}.csv`);
+                                    }}
+                                    className="px-4 py-2 rounded-xl text-sm font-bold border border-gray-200 bg-white hover:bg-gray-50 transition-colors"
+                                >
+                                    导出 CSV
+                                </button>
+                                <button
+                                    onClick={fetchGlobalTasks}
+                                    disabled={globalTasksLoading}
+                                    className="flex items-center gap-2 text-sm text-brand-purple font-bold hover:bg-purple-50 px-3 py-2 rounded-xl transition-colors border border-transparent hover:border-purple-100 disabled:opacity-60"
+                                >
+                                    <RefreshCw size={14} className={globalTasksLoading ? 'animate-spin' : ''} /> 刷新
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-4">
+                            <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
+                                <div className="md:col-span-2">
+                                    <label className="block text-xs font-bold text-gray-700 mb-1">关键词（任务/用户/模型）</label>
+                                    <div className="flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2">
+                                        <Search size={14} className="text-gray-400" />
+                                        <input
+                                            value={tasksQ}
+                                            onChange={(e) => setTasksQ(e.target.value)}
+                                            placeholder="例如：上海 / DeepSeek / 用户邮箱"
+                                            className="w-full bg-transparent outline-none text-sm"
+                                        />
+                                    </div>
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold text-gray-700 mb-1">用户邮箱</label>
+                                    <input
+                                        value={tasksEmail}
+                                        onChange={(e) => setTasksEmail(e.target.value)}
+                                        placeholder="user@example.com"
+                                        className="w-full px-3 py-2 border border-gray-200 rounded-xl text-sm focus:border-brand-purple outline-none bg-gray-50"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold text-gray-700 mb-1">模型源</label>
+                                    <input
+                                        value={tasksModelKey}
+                                        onChange={(e) => setTasksModelKey(e.target.value)}
+                                        placeholder="DeepSeek / 通义千问"
+                                        className="w-full px-3 py-2 border border-gray-200 rounded-xl text-sm focus:border-brand-purple outline-none bg-gray-50"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold text-gray-700 mb-1">状态</label>
+                                    <select
+                                        value={tasksStatus}
+                                        onChange={(e) => setTasksStatus(e.target.value as any)}
+                                        className="w-full px-3 py-2 border border-gray-200 rounded-xl text-sm focus:border-brand-purple outline-none bg-gray-50"
+                                    >
+                                        <option value="ALL">全部</option>
+                                        <option value="COMPLETED">完成</option>
+                                        <option value="FAILED">失败</option>
+                                        <option value="RUNNING">进行中</option>
+                                        <option value="PENDING">排队</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold text-gray-700 mb-1">模式</label>
+                                    <select
+                                        value={tasksSearchType}
+                                        onChange={(e) => setTasksSearchType(e.target.value as any)}
+                                        className="w-full px-3 py-2 border border-gray-200 rounded-xl text-sm focus:border-brand-purple outline-none bg-gray-50"
+                                    >
+                                        <option value="ALL">全部</option>
+                                        <option value="quick">快速</option>
+                                        <option value="deep">深度</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div className="mt-3 grid grid-cols-1 md:grid-cols-6 gap-3">
+                                <div className="md:col-span-2">
+                                    <label className="block text-xs font-bold text-gray-700 mb-1">开始日期</label>
+                                    <input
+                                        type="date"
+                                        value={tasksFrom}
+                                        onChange={(e) => setTasksFrom(e.target.value)}
+                                        className="w-full px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm outline-none focus:border-brand-purple focus:ring-2 focus:ring-purple-50"
+                                    />
+                                </div>
+                                <div className="md:col-span-2">
+                                    <label className="block text-xs font-bold text-gray-700 mb-1">结束日期</label>
+                                    <input
+                                        type="date"
+                                        value={tasksTo}
+                                        onChange={(e) => setTasksTo(e.target.value)}
+                                        className="w-full px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm outline-none focus:border-brand-purple focus:ring-2 focus:ring-purple-50"
+                                    />
+                                </div>
+                                <div className="md:col-span-1">
+                                    <label className="block text-xs font-bold text-gray-700 mb-1">每页</label>
+                                    <select
+                                        value={tasksLimit}
+                                        onChange={(e) => {
+                                            const next = Number.parseInt(e.target.value, 10) || 100;
+                                            setTasksLimit(next);
+                                            setTasksOffset(0);
+                                            fetchGlobalTasks({ limit: next, offset: 0 });
+                                        }}
+                                        className="w-full px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm outline-none focus:border-brand-purple focus:ring-2 focus:ring-purple-50"
+                                    >
+                                        {[50, 100, 200].map((n) => (
+                                            <option key={n} value={n}>
+                                                {n}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+                                <div className="md:col-span-1 flex items-end gap-2">
+                                    <button
+                                        onClick={() => {
+                                            const next = Math.max(0, tasksOffset - tasksLimit);
+                                            setTasksOffset(next);
+                                            fetchGlobalTasks({ offset: next });
+                                        }}
+                                        disabled={globalTasksLoading || tasksOffset <= 0}
+                                        className="flex-1 px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm font-bold hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    >
+                                        上一页
+                                    </button>
+                                    <button
+                                        onClick={() => {
+                                            const next = tasksOffset + tasksLimit;
+                                            setTasksOffset(next);
+                                            fetchGlobalTasks({ offset: next });
+                                        }}
+                                        disabled={globalTasksLoading || tasksOffset + tasksLimit >= globalTasksTotal}
+                                        className="flex-1 px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm font-bold hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    >
+                                        下一页
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div className="mt-4 flex items-center justify-between">
+                                <div className="text-xs text-gray-400 tabular-nums">
+                                    {globalTasksError ? (
+                                        <span className="text-red-600 font-bold">{globalTasksError}</span>
+                                    ) : (
+                                        <>
+                                            <span>
+                                                共 {globalTasksTotal.toLocaleString()} 条 · 第{' '}
+                                                {Math.floor(tasksOffset / tasksLimit) + 1} /{' '}
+                                                {Math.max(1, Math.ceil(globalTasksTotal / tasksLimit))} 页
+                                            </span>
+                                        </>
+                                    )}
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <button
+                                        onClick={() => {
+                                            setTasksQ('');
+                                            setTasksEmail('');
+                                            setTasksModelKey('');
+                                            setTasksStatus('ALL');
+                                            setTasksSearchType('ALL');
+                                            setTasksFrom('');
+                                            setTasksTo('');
+                                            setTasksOffset(0);
+                                            fetchGlobalTasks({ offset: 0 });
+                                        }}
+                                        disabled={globalTasksLoading}
+                                        className="px-4 py-2 rounded-xl border border-gray-200 bg-white text-sm font-bold hover:bg-gray-50 disabled:opacity-60"
+                                    >
+                                        重置
+                                    </button>
+                                    <button
+                                        onClick={() => {
+                                            setTasksOffset(0);
+                                            fetchGlobalTasks({ offset: 0 });
+                                        }}
+                                        disabled={globalTasksLoading}
+                                        className="bg-brand-purple text-white px-5 py-2 rounded-xl text-sm font-bold shadow-lg shadow-purple-200 hover:bg-brand-hover active:scale-95 transition-all disabled:opacity-60"
+                                    >
+                                        查询
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-sm">
+                                    <thead className="bg-gray-50 border-b border-gray-100 text-xs text-gray-500 uppercase tracking-wider">
+                                        <tr>
+                                            <th className="px-4 py-3 text-left">时间</th>
+                                            <th className="px-4 py-3 text-left">用户</th>
+                                            <th className="px-4 py-3 text-left">状态</th>
+                                            <th className="px-4 py-3 text-left">模式</th>
+                                            <th className="px-4 py-3 text-left">成本</th>
+                                            <th className="px-4 py-3 text-left">模型</th>
+                                            <th className="px-4 py-3 text-left">关键词</th>
+                                            <th className="px-4 py-3 text-right">操作</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-gray-100">
+                                        {globalTasksLoading ? (
+                                            <tr>
+                                                <td colSpan={8} className="px-4 py-8 text-center text-gray-400">
+                                                    <RefreshCw size={16} className="inline-block mr-2 animate-spin" />
+                                                    加载中...
+                                                </td>
+                                            </tr>
+                                        ) : globalTasks.length === 0 ? (
+                                            <tr>
+                                                <td colSpan={8} className="px-4 py-10 text-center text-gray-400">
+                                                    暂无任务记录
+                                                </td>
+                                            </tr>
+                                        ) : (
+                                            globalTasks.map((t) => (
+                                                <tr key={t.id} className="hover:bg-gray-50 transition-colors">
+                                                    <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">
+                                                        {t.createdAt ? new Date(t.createdAt).toLocaleString() : '-'}
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        <div className="text-xs font-bold text-gray-900">{t.user?.email || '-'}</div>
+                                                        <div className="text-[10px] text-gray-400">ID: {t.user?.id ?? '-'}</div>
+                                                    </td>
+                                                    <td className="px-4 py-3 text-xs font-bold">
+                                                        <span
+                                                            className={`px-2 py-0.5 rounded ${
+                                                                t.status === 'COMPLETED'
+                                                                    ? 'bg-green-50 text-green-700'
+                                                                    : t.status === 'FAILED'
+                                                                      ? 'bg-red-50 text-red-700'
+                                                                      : t.status === 'RUNNING'
+                                                                        ? 'bg-yellow-50 text-yellow-700'
+                                                                        : 'bg-gray-50 text-gray-700'
+                                                            }`}
+                                                        >
+                                                            {t.status}
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-4 py-3 text-xs font-bold">
+                                                        <span className={`px-2 py-0.5 rounded ${t.searchType === 'deep' ? 'bg-purple-50 text-brand-purple' : 'bg-blue-50 text-blue-700'}`}>
+                                                            {t.searchType === 'deep' ? '深度' : '快速'}
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-4 py-3 text-xs text-gray-700 tabular-nums whitespace-nowrap">
+                                                        {t.costUnits}（免费 {t.quotaUnits} / 点数 {t.pointsUnits}）
+                                                    </td>
+                                                    <td className="px-4 py-3 text-xs text-gray-700">
+                                                        <div className="font-bold">{Array.isArray(t.selectedModels) ? t.selectedModels.length : 0} 个</div>
+                                                        <div className="text-[10px] text-gray-400 truncate max-w-[160px]" title={Array.isArray(t.selectedModels) ? t.selectedModels.join('、') : ''}>
+                                                            {Array.isArray(t.selectedModels) ? t.selectedModels.join('、') : '-'}
+                                                        </div>
+                                                    </td>
+                                                    <td className="px-4 py-3 text-xs text-gray-700 max-w-[360px] truncate" title={t.keyword}>
+                                                        {t.keyword}
+                                                    </td>
+                                                    <td className="px-4 py-3 text-right whitespace-nowrap">
+                                                        <button
+                                                            onClick={() => openGlobalTaskDetail(t.id)}
+                                                            disabled={globalDetailLoading}
+                                                            className="text-xs font-bold text-brand-purple hover:underline disabled:opacity-60 mr-3"
+                                                        >
+                                                            报告
+                                                        </button>
+                                                        <button
+                                                            onClick={() => {
+                                                                setCallsQ(t.id);
+                                                                setCallsEmail('');
+                                                                setCallsModelKey('');
+                                                                setCallsPurpose('ALL');
+                                                                setCallsStatus('ALL');
+                                                                setCallsFrom('');
+                                                                setCallsTo('');
+                                                                setCallsOffset(0);
+                                                                setActiveTab('calls');
+                                                            }}
+                                                            className="text-xs font-bold text-gray-700 hover:underline"
+                                                        >
+                                                            调用
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            ))
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
                     </div>
                 );
             case 'engines':
@@ -905,6 +2472,763 @@ export const AdminPage = ({ onExit }: { onExit: () => void }) => {
                             <div className="fixed inset-0 bg-gray-900/20 backdrop-blur-[1px] z-50 transition-opacity" onClick={() => setSelectedEngine(null)}></div>
                         )}
                         {selectedEngine && <EngineConfigDrawer brand={selectedEngine} onClose={() => setSelectedEngine(null)} />}
+                    </div>
+                );
+            case 'calls':
+                return (
+                    <div className="space-y-5 animate-fade-in">
+                        <div className="flex items-center justify-between">
+                            <div>
+                                <h3 className="text-lg font-bold text-gray-900">全站调用记录</h3>
+                                <p className="text-sm text-gray-500">汇总所有用户的模型调用与深度分析调用明细（可筛选/追溯）。</p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <button
+                                    onClick={() => {
+                                        const params = new URLSearchParams();
+                                        params.set('limit', '5000');
+                                        if (callsQ.trim()) params.set('q', callsQ.trim());
+                                        if (callsEmail.trim()) params.set('email', callsEmail.trim());
+                                        if (callsModelKey.trim()) params.set('modelKey', callsModelKey.trim());
+                                        if (callsPurpose !== 'ALL') params.set('purpose', callsPurpose);
+                                        if (callsStatus !== 'ALL') params.set('status', callsStatus);
+                                        if (callsFrom) params.set('from', callsFrom);
+                                        if (callsTo) params.set('to', callsTo);
+                                        downloadCsv(`/api/admin/export/runs.csv?${params.toString()}`, `runs_${Date.now()}.csv`);
+                                    }}
+                                    className="px-4 py-2 rounded-xl text-sm font-bold border border-gray-200 bg-white hover:bg-gray-50 transition-colors"
+                                >
+                                    导出 CSV
+                                </button>
+                                <button
+                                    onClick={fetchGlobalRuns}
+                                    disabled={globalRunsLoading}
+                                    className="flex items-center gap-2 text-sm text-brand-purple font-bold hover:bg-purple-50 px-3 py-2 rounded-xl transition-colors border border-transparent hover:border-purple-100 disabled:opacity-60"
+                                >
+                                    <RefreshCw size={14} className={globalRunsLoading ? 'animate-spin' : ''} /> 刷新
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-4">
+                            <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+                                <div className="md:col-span-2">
+                                    <label className="block text-xs font-bold text-gray-700 mb-1">关键词（任务/用户/模型）</label>
+                                    <div className="flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2">
+                                        <Search size={14} className="text-gray-400" />
+                                        <input
+                                            value={callsQ}
+                                            onChange={(e) => setCallsQ(e.target.value)}
+                                            placeholder="例如：上海 / deepseek / user@example.com"
+                                            className="w-full bg-transparent outline-none text-sm"
+                                        />
+                                    </div>
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold text-gray-700 mb-1">用户邮箱</label>
+                                    <input
+                                        value={callsEmail}
+                                        onChange={(e) => setCallsEmail(e.target.value)}
+                                        placeholder="user@example.com"
+                                        className="w-full px-3 py-2 border border-gray-200 rounded-xl text-sm focus:border-brand-purple outline-none bg-gray-50"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold text-gray-700 mb-1">模型源</label>
+                                    <input
+                                        value={callsModelKey}
+                                        onChange={(e) => setCallsModelKey(e.target.value)}
+                                        placeholder="DeepSeek / 通义千问"
+                                        className="w-full px-3 py-2 border border-gray-200 rounded-xl text-sm focus:border-brand-purple outline-none bg-gray-50"
+                                    />
+                                </div>
+                                <div className="grid grid-cols-2 gap-3 md:col-span-1">
+                                    <div>
+                                        <label className="block text-xs font-bold text-gray-700 mb-1">用途</label>
+                                        <select
+                                            value={callsPurpose}
+                                            onChange={(e) => setCallsPurpose(e.target.value as any)}
+                                            className="w-full px-3 py-2 border border-gray-200 rounded-xl text-sm focus:border-brand-purple outline-none bg-gray-50"
+                                        >
+                                            <option value="ALL">全部</option>
+                                            <option value="MODEL">模型</option>
+                                            <option value="ANALYSIS">分析</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-bold text-gray-700 mb-1">状态</label>
+                                        <select
+                                            value={callsStatus}
+                                            onChange={(e) => setCallsStatus(e.target.value as any)}
+                                            className="w-full px-3 py-2 border border-gray-200 rounded-xl text-sm focus:border-brand-purple outline-none bg-gray-50"
+                                        >
+                                            <option value="ALL">全部</option>
+                                            <option value="SUCCEEDED">成功</option>
+                                            <option value="FAILED">失败</option>
+                                            <option value="RUNNING">进行中</option>
+                                            <option value="PENDING">排队</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="mt-3 grid grid-cols-1 md:grid-cols-6 gap-3">
+                                <div className="md:col-span-2">
+                                    <label className="block text-xs font-bold text-gray-700 mb-1">开始日期</label>
+                                    <input
+                                        type="date"
+                                        value={callsFrom}
+                                        onChange={(e) => setCallsFrom(e.target.value)}
+                                        className="w-full px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm outline-none focus:border-brand-purple focus:ring-2 focus:ring-purple-50"
+                                    />
+                                </div>
+                                <div className="md:col-span-2">
+                                    <label className="block text-xs font-bold text-gray-700 mb-1">结束日期</label>
+                                    <input
+                                        type="date"
+                                        value={callsTo}
+                                        onChange={(e) => setCallsTo(e.target.value)}
+                                        className="w-full px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm outline-none focus:border-brand-purple focus:ring-2 focus:ring-purple-50"
+                                    />
+                                </div>
+                                <div className="md:col-span-1">
+                                    <label className="block text-xs font-bold text-gray-700 mb-1">每页</label>
+                                    <select
+                                        value={callsLimit}
+                                        onChange={(e) => {
+                                            const next = Number.parseInt(e.target.value, 10) || 100;
+                                            setCallsLimit(next);
+                                            setCallsOffset(0);
+                                            fetchGlobalRuns({ limit: next, offset: 0 });
+                                        }}
+                                        className="w-full px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm outline-none focus:border-brand-purple focus:ring-2 focus:ring-purple-50"
+                                    >
+                                        {[50, 100, 200].map((n) => (
+                                            <option key={n} value={n}>
+                                                {n}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+                                <div className="md:col-span-1 flex items-end gap-2">
+                                    <button
+                                        onClick={() => {
+                                            const next = Math.max(0, callsOffset - callsLimit);
+                                            setCallsOffset(next);
+                                            fetchGlobalRuns({ offset: next });
+                                        }}
+                                        disabled={globalRunsLoading || callsOffset <= 0}
+                                        className="flex-1 px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm font-bold hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    >
+                                        上一页
+                                    </button>
+                                    <button
+                                        onClick={() => {
+                                            const next = callsOffset + callsLimit;
+                                            setCallsOffset(next);
+                                            fetchGlobalRuns({ offset: next });
+                                        }}
+                                        disabled={globalRunsLoading || callsOffset + callsLimit >= globalRunsTotal}
+                                        className="flex-1 px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm font-bold hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    >
+                                        下一页
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div className="mt-4 flex items-center justify-between">
+                                <div className="text-xs text-gray-400 tabular-nums">
+                                    {globalRunsError ? (
+                                        <span className="text-red-600 font-bold">{globalRunsError}</span>
+                                    ) : (
+                                        <>
+                                            <span>
+                                                共 {globalRunsTotal.toLocaleString()} 条 · 第{' '}
+                                                {Math.floor(callsOffset / callsLimit) + 1} /{' '}
+                                                {Math.max(1, Math.ceil(globalRunsTotal / callsLimit))} 页
+                                            </span>
+                                        </>
+                                    )}
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <button
+                                        onClick={() => {
+                                            setCallsQ('');
+                                            setCallsEmail('');
+                                            setCallsModelKey('');
+                                            setCallsPurpose('ALL');
+                                            setCallsStatus('ALL');
+                                            setCallsFrom('');
+                                            setCallsTo('');
+                                            setCallsOffset(0);
+                                            fetchGlobalRuns({ offset: 0 });
+                                        }}
+                                        disabled={globalRunsLoading}
+                                        className="px-4 py-2 rounded-xl border border-gray-200 bg-white text-sm font-bold hover:bg-gray-50 disabled:opacity-60"
+                                    >
+                                        重置
+                                    </button>
+                                    <button
+                                        onClick={() => {
+                                            setCallsOffset(0);
+                                            fetchGlobalRuns({ offset: 0 });
+                                        }}
+                                        disabled={globalRunsLoading}
+                                        className="bg-brand-purple text-white px-5 py-2 rounded-xl text-sm font-bold shadow-lg shadow-purple-200 hover:bg-brand-hover active:scale-95 transition-all disabled:opacity-60"
+                                    >
+                                        查询
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-sm">
+                                    <thead className="bg-gray-50 border-b border-gray-100 text-xs text-gray-500 uppercase tracking-wider">
+                                        <tr>
+                                            <th className="px-4 py-3 text-left">时间</th>
+                                            <th className="px-4 py-3 text-left">用户</th>
+                                            <th className="px-4 py-3 text-left">用途</th>
+                                            <th className="px-4 py-3 text-left">模型源</th>
+                                            <th className="px-4 py-3 text-left">状态</th>
+                                            <th className="px-4 py-3 text-left">耗时</th>
+                                            <th className="px-4 py-3 text-left">任务关键词</th>
+                                            <th className="px-4 py-3 text-right">操作</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-gray-100">
+                                        {globalRunsLoading ? (
+                                            <tr>
+                                                <td colSpan={8} className="px-4 py-8 text-center text-gray-400">
+                                                    <RefreshCw size={16} className="inline-block mr-2 animate-spin" />
+                                                    加载中...
+                                                </td>
+                                            </tr>
+                                        ) : globalRuns.length === 0 ? (
+                                            <tr>
+                                                <td colSpan={8} className="px-4 py-10 text-center text-gray-400">
+                                                    暂无调用记录
+                                                </td>
+                                            </tr>
+                                        ) : (
+                                            globalRuns.map((r) => (
+                                                <tr key={r.id} className="hover:bg-gray-50 transition-colors">
+                                                    <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">
+                                                        {r.createdAt ? new Date(r.createdAt).toLocaleString() : '-'}
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        <div className="text-xs font-bold text-gray-900">
+                                                            {r.user?.email || '-'}
+                                                        </div>
+                                                        <div className="text-[10px] text-gray-400">ID: {r.user?.id ?? '-'}</div>
+                                                    </td>
+                                                    <td className="px-4 py-3 text-xs font-bold">
+                                                        <span className={`px-2 py-0.5 rounded ${r.purpose === 'ANALYSIS' ? 'bg-purple-50 text-brand-purple' : 'bg-blue-50 text-blue-700'}`}>
+                                                            {r.purpose === 'ANALYSIS' ? '分析' : '模型'}
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        <div className="text-xs font-bold text-gray-900">{r.modelKey}</div>
+                                                        <div className="text-[10px] text-gray-400">{r.provider || '-'}:{r.modelName || '-'}</div>
+                                                    </td>
+                                                    <td className="px-4 py-3 text-xs font-bold">
+                                                        <span
+                                                            className={`px-2 py-0.5 rounded ${
+                                                                r.status === 'SUCCEEDED'
+                                                                    ? 'bg-green-50 text-green-700'
+                                                                    : r.status === 'FAILED'
+                                                                      ? 'bg-red-50 text-red-700'
+                                                                      : r.status === 'RUNNING'
+                                                                        ? 'bg-yellow-50 text-yellow-700'
+                                                                        : 'bg-gray-50 text-gray-700'
+                                                            }`}
+                                                        >
+                                                            {r.status}
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-4 py-3 text-xs text-gray-500 tabular-nums whitespace-nowrap">
+                                                        {typeof r.latencyMs === 'number' ? `${Math.round(r.latencyMs / 1000)}s` : '-'}
+                                                    </td>
+                                                    <td className="px-4 py-3 text-xs text-gray-700 max-w-[360px] truncate" title={r.taskKeyword}>
+                                                        {r.taskKeyword}
+                                                    </td>
+                                                    <td className="px-4 py-3 text-right whitespace-nowrap">
+                                                        <button
+                                                            onClick={() => openGlobalRunDetail(r.id)}
+                                                            disabled={globalDetailLoading}
+                                                            className="text-xs font-bold text-brand-purple hover:underline disabled:opacity-60 mr-3"
+                                                        >
+                                                            详情
+                                                        </button>
+                                                        <button
+                                                            onClick={() => openGlobalTaskDetail(r.taskId)}
+                                                            disabled={globalDetailLoading}
+                                                            className="text-xs font-bold text-gray-700 hover:underline disabled:opacity-60"
+                                                        >
+                                                            任务
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            ))
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                );
+            case 'billing':
+                return (
+                    <div className="space-y-5 animate-fade-in">
+                        <div className="flex items-center justify-between">
+	                            <div>
+	                                <h3 className="text-lg font-bold text-gray-900">全站扣费记录</h3>
+	                                <p className="text-sm text-gray-500">汇总所有用户的点数变动日志（扣费/充值/退款/管理员调整）。</p>
+	                                <div className="text-[11px] text-gray-400 mt-1 tabular-nums">共 {globalPointsTotal.toLocaleString()} 条</div>
+	                            </div>
+	                            <div className="flex items-center gap-2">
+	                                <button
+	                                    onClick={() => {
+	                                        const params = new URLSearchParams();
+	                                        params.set('limit', '5000');
+	                                        if (pointsQ.trim()) params.set('q', pointsQ.trim());
+	                                        if (pointsEmail.trim()) params.set('email', pointsEmail.trim());
+	                                        if (pointsType !== 'ALL') params.set('type', pointsType);
+	                                        if (pointsFrom) params.set('from', pointsFrom);
+	                                        if (pointsTo) params.set('to', pointsTo);
+	                                        downloadCsv(`/api/admin/export/points-logs.csv?${params.toString()}`, `points_logs_${Date.now()}.csv`);
+	                                    }}
+	                                    className="px-4 py-2 rounded-xl text-sm font-bold border border-gray-200 bg-white hover:bg-gray-50 transition-colors"
+	                                >
+                                    导出 CSV
+                                </button>
+                                <button
+                                    onClick={fetchGlobalPointsLogs}
+                                    disabled={globalPointsLoading}
+                                    className="flex items-center gap-2 text-sm text-brand-purple font-bold hover:bg-purple-50 px-3 py-2 rounded-xl transition-colors border border-transparent hover:border-purple-100 disabled:opacity-60"
+                                >
+                                    <RefreshCw size={14} className={globalPointsLoading ? 'animate-spin' : ''} /> 刷新
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-4">
+                            <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
+                                <div className="md:col-span-2">
+                                    <label className="block text-xs font-bold text-gray-700 mb-1">描述关键词</label>
+                                    <div className="flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2">
+                                        <Search size={14} className="text-gray-400" />
+                                        <input
+                                            value={pointsQ}
+                                            onChange={(e) => setPointsQ(e.target.value)}
+                                            placeholder="例如：执行任务 / 管理员充值"
+                                            className="bg-transparent outline-none text-sm w-full"
+                                        />
+                                    </div>
+                                </div>
+                                <div className="md:col-span-2">
+                                    <label className="block text-xs font-bold text-gray-700 mb-1">用户邮箱</label>
+                                    <input
+                                        value={pointsEmail}
+                                        onChange={(e) => setPointsEmail(e.target.value)}
+                                        placeholder="name@example.com"
+                                        className="w-full px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm outline-none focus:border-brand-purple focus:ring-2 focus:ring-purple-50"
+                                    />
+                                </div>
+                                <div className="md:col-span-2">
+                                    <label className="block text-xs font-bold text-gray-700 mb-1">类型</label>
+                                    <select
+                                        value={pointsType}
+                                        onChange={(e) => setPointsType(e.target.value as any)}
+                                        className="w-full px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm outline-none focus:border-brand-purple focus:ring-2 focus:ring-purple-50"
+                                    >
+                                        <option value="ALL">全部</option>
+                                        <option value="CONSUME">消费</option>
+                                        <option value="RECHARGE">充值</option>
+                                        <option value="REFUND">退款</option>
+                                        <option value="ADMIN_ADD">管理员增加</option>
+                                        <option value="ADMIN_SUB">管理员扣除</option>
+                                    </select>
+	                                </div>
+	                            </div>
+	
+	                            <div className="mt-3 grid grid-cols-1 md:grid-cols-6 gap-3">
+	                                <div className="md:col-span-2">
+	                                    <label className="block text-xs font-bold text-gray-700 mb-1">开始日期</label>
+	                                    <input
+	                                        type="date"
+	                                        value={pointsFrom}
+	                                        onChange={(e) => setPointsFrom(e.target.value)}
+	                                        className="w-full px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm outline-none focus:border-brand-purple focus:ring-2 focus:ring-purple-50"
+	                                    />
+	                                </div>
+	                                <div className="md:col-span-2">
+	                                    <label className="block text-xs font-bold text-gray-700 mb-1">结束日期</label>
+	                                    <input
+	                                        type="date"
+	                                        value={pointsTo}
+	                                        onChange={(e) => setPointsTo(e.target.value)}
+	                                        className="w-full px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm outline-none focus:border-brand-purple focus:ring-2 focus:ring-purple-50"
+	                                    />
+	                                </div>
+	                                <div className="md:col-span-1">
+	                                    <label className="block text-xs font-bold text-gray-700 mb-1">每页</label>
+	                                    <select
+	                                        value={pointsLimit}
+	                                        onChange={(e) => {
+	                                            const next = Number.parseInt(e.target.value, 10) || 100;
+	                                            setPointsLimit(next);
+	                                            setPointsOffset(0);
+	                                            fetchGlobalPointsLogs({ limit: next, offset: 0 });
+	                                        }}
+	                                        className="w-full px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm outline-none focus:border-brand-purple focus:ring-2 focus:ring-purple-50"
+	                                    >
+	                                        {[50, 100, 200].map((n) => (
+	                                            <option key={n} value={n}>
+	                                                {n}
+	                                            </option>
+	                                        ))}
+	                                    </select>
+	                                </div>
+	                                <div className="md:col-span-1 flex items-end gap-2">
+	                                    <button
+	                                        onClick={() => {
+	                                            const next = Math.max(0, pointsOffset - pointsLimit);
+	                                            setPointsOffset(next);
+	                                            fetchGlobalPointsLogs({ offset: next });
+	                                        }}
+	                                        disabled={globalPointsLoading || pointsOffset <= 0}
+	                                        className="flex-1 px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm font-bold hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+	                                    >
+	                                        上一页
+	                                    </button>
+	                                    <button
+	                                        onClick={() => {
+	                                            const next = pointsOffset + pointsLimit;
+	                                            setPointsOffset(next);
+	                                            fetchGlobalPointsLogs({ offset: next });
+	                                        }}
+	                                        disabled={globalPointsLoading || pointsOffset + pointsLimit >= globalPointsTotal}
+	                                        className="flex-1 px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm font-bold hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+	                                    >
+	                                        下一页
+	                                    </button>
+	                                </div>
+	                            </div>
+
+	                            <div className="mt-4 flex items-center justify-between">
+	                                <div className="text-xs text-gray-400 tabular-nums">
+	                                    {globalPointsError ? (
+	                                        <span className="text-red-600 font-bold">{globalPointsError}</span>
+	                                    ) : (
+	                                        <span>
+	                                            共 {globalPointsTotal.toLocaleString()} 条 · 第 {Math.floor(pointsOffset / pointsLimit) + 1} /{' '}
+	                                            {Math.max(1, Math.ceil(globalPointsTotal / pointsLimit))} 页
+	                                        </span>
+	                                    )}
+	                                </div>
+	                                <div className="flex items-center gap-2">
+	                                    <button
+	                                        onClick={() => {
+	                                            setPointsQ('');
+	                                            setPointsEmail('');
+	                                            setPointsType('ALL');
+	                                            setPointsFrom('');
+	                                            setPointsTo('');
+	                                            setPointsOffset(0);
+	                                            fetchGlobalPointsLogs({ offset: 0 });
+	                                        }}
+	                                        disabled={globalPointsLoading}
+	                                        className="px-4 py-2 rounded-xl border border-gray-200 bg-white text-sm font-bold hover:bg-gray-50 disabled:opacity-60"
+	                                    >
+	                                        重置
+	                                    </button>
+	                                    <button
+	                                        onClick={() => {
+	                                            setPointsOffset(0);
+	                                            fetchGlobalPointsLogs({ offset: 0 });
+	                                        }}
+	                                        disabled={globalPointsLoading}
+	                                        className="bg-brand-purple text-white px-5 py-2 rounded-xl text-sm font-bold shadow-lg shadow-purple-200 hover:bg-brand-hover active:scale-95 transition-all disabled:opacity-60"
+	                                    >
+	                                        查询
+	                                    </button>
+	                                </div>
+	                            </div>
+	                        </div>
+	
+	                        <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
+	                            <div className="overflow-x-auto">
+	                                <table className="w-full text-sm text-left">
+	                                    <thead className="bg-gray-50 border-b border-gray-100 text-xs text-gray-500 uppercase tracking-wider">
+	                                        <tr>
+                                            <th className="px-4 py-3 text-left">时间</th>
+                                            <th className="px-4 py-3 text-left">用户</th>
+                                            <th className="px-4 py-3 text-left">类型</th>
+                                            <th className="px-4 py-3 text-left">变动</th>
+                                            <th className="px-4 py-3 text-left">余额</th>
+                                            <th className="px-4 py-3 text-left">描述</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-gray-100">
+                                        {globalPointsLoading ? (
+                                            <tr>
+                                                <td colSpan={6} className="px-4 py-8 text-center text-gray-400">
+                                                    <RefreshCw size={16} className="inline-block mr-2 animate-spin" />
+                                                    加载中...
+                                                </td>
+                                            </tr>
+                                        ) : globalPointsLogs.length === 0 ? (
+                                            <tr>
+                                                <td colSpan={6} className="px-4 py-10 text-center text-gray-400">
+                                                    暂无扣费记录
+                                                </td>
+                                            </tr>
+                                        ) : (
+                                            globalPointsLogs.map((l) => (
+                                                <tr key={l.id} className="hover:bg-gray-50 transition-colors">
+                                                    <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">
+                                                        {l.createdAt ? new Date(l.createdAt).toLocaleString() : '-'}
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        <div className="text-xs font-bold text-gray-900">{l.user?.email || '-'}</div>
+                                                        <div className="text-[10px] text-gray-400">ID: {l.userId}</div>
+                                                    </td>
+                                                    <td className="px-4 py-3 text-xs font-bold">{l.type}</td>
+                                                    <td className="px-4 py-3 text-xs font-bold tabular-nums whitespace-nowrap">
+                                                        <span className={l.amount < 0 ? 'text-red-600' : 'text-green-600'}>
+                                                            {l.amount > 0 ? `+${l.amount}` : `${l.amount}`}
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-4 py-3 text-xs text-gray-700 tabular-nums whitespace-nowrap">{l.balance}</td>
+                                                    <td className="px-4 py-3 text-xs text-gray-700 max-w-[420px] truncate" title={l.description || ''}>
+                                                        {l.description || '-'}
+                                                    </td>
+                                                </tr>
+                                            ))
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                );
+            case 'pageviews':
+                return (
+                    <div className="space-y-5 animate-fade-in">
+                        <div className="flex items-center justify-between">
+	                            <div>
+	                                <h3 className="text-lg font-bold text-gray-900">全站浏览足迹</h3>
+	                                <p className="text-sm text-gray-500">汇总所有用户的页面访问路径与停留时长（用于分析留存与使用习惯）。</p>
+	                                <div className="text-[11px] text-gray-400 mt-1 tabular-nums">共 {globalPageViewsTotal.toLocaleString()} 条</div>
+	                            </div>
+	                            <div className="flex items-center gap-2">
+	                                <button
+	                                    onClick={() => {
+	                                        const params = new URLSearchParams();
+	                                        params.set('limit', '5000');
+	                                        if (pageViewsQ.trim()) params.set('q', pageViewsQ.trim());
+	                                        if (pageViewsEmail.trim()) params.set('email', pageViewsEmail.trim());
+	                                        if (pageViewsFrom) params.set('from', pageViewsFrom);
+	                                        if (pageViewsTo) params.set('to', pageViewsTo);
+	                                        downloadCsv(`/api/admin/export/pageviews.csv?${params.toString()}`, `pageviews_${Date.now()}.csv`);
+	                                    }}
+	                                    className="px-4 py-2 rounded-xl text-sm font-bold border border-gray-200 bg-white hover:bg-gray-50 transition-colors"
+	                                >
+                                    导出 CSV
+                                </button>
+                                <button
+                                    onClick={fetchGlobalPageViews}
+                                    disabled={globalPageViewsLoading}
+                                    className="flex items-center gap-2 text-sm text-brand-purple font-bold hover:bg-purple-50 px-3 py-2 rounded-xl transition-colors border border-transparent hover:border-purple-100 disabled:opacity-60"
+                                >
+                                    <RefreshCw size={14} className={globalPageViewsLoading ? 'animate-spin' : ''} /> 刷新
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-4">
+                            <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
+                                <div className="md:col-span-4">
+                                    <label className="block text-xs font-bold text-gray-700 mb-1">路径关键词</label>
+                                    <div className="flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2">
+                                        <Search size={14} className="text-gray-400" />
+                                        <input
+                                            value={pageViewsQ}
+                                            onChange={(e) => setPageViewsQ(e.target.value)}
+                                            placeholder="例如：/results /monitoring"
+                                            className="bg-transparent outline-none text-sm w-full"
+                                        />
+                                    </div>
+                                </div>
+                                <div className="md:col-span-2">
+                                    <label className="block text-xs font-bold text-gray-700 mb-1">用户邮箱</label>
+                                    <input
+                                        value={pageViewsEmail}
+                                        onChange={(e) => setPageViewsEmail(e.target.value)}
+                                        placeholder="name@example.com"
+                                        className="w-full px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm outline-none focus:border-brand-purple focus:ring-2 focus:ring-purple-50"
+                                    />
+	                                </div>
+	                            </div>
+	
+	                            <div className="mt-3 grid grid-cols-1 md:grid-cols-6 gap-3">
+	                                <div className="md:col-span-2">
+	                                    <label className="block text-xs font-bold text-gray-700 mb-1">开始日期</label>
+	                                    <input
+	                                        type="date"
+	                                        value={pageViewsFrom}
+	                                        onChange={(e) => setPageViewsFrom(e.target.value)}
+	                                        className="w-full px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm outline-none focus:border-brand-purple focus:ring-2 focus:ring-purple-50"
+	                                    />
+	                                </div>
+	                                <div className="md:col-span-2">
+	                                    <label className="block text-xs font-bold text-gray-700 mb-1">结束日期</label>
+	                                    <input
+	                                        type="date"
+	                                        value={pageViewsTo}
+	                                        onChange={(e) => setPageViewsTo(e.target.value)}
+	                                        className="w-full px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm outline-none focus:border-brand-purple focus:ring-2 focus:ring-purple-50"
+	                                    />
+	                                </div>
+	                                <div className="md:col-span-1">
+	                                    <label className="block text-xs font-bold text-gray-700 mb-1">每页</label>
+	                                    <select
+	                                        value={pageViewsLimit}
+	                                        onChange={(e) => {
+	                                            const next = Number.parseInt(e.target.value, 10) || 100;
+	                                            setPageViewsLimit(next);
+	                                            setPageViewsOffset(0);
+	                                            fetchGlobalPageViews({ limit: next, offset: 0 });
+	                                        }}
+	                                        className="w-full px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm outline-none focus:border-brand-purple focus:ring-2 focus:ring-purple-50"
+	                                    >
+	                                        {[50, 100, 200].map((n) => (
+	                                            <option key={n} value={n}>
+	                                                {n}
+	                                            </option>
+	                                        ))}
+	                                    </select>
+	                                </div>
+	                                <div className="md:col-span-1 flex items-end gap-2">
+	                                    <button
+	                                        onClick={() => {
+	                                            const next = Math.max(0, pageViewsOffset - pageViewsLimit);
+	                                            setPageViewsOffset(next);
+	                                            fetchGlobalPageViews({ offset: next });
+	                                        }}
+	                                        disabled={globalPageViewsLoading || pageViewsOffset <= 0}
+	                                        className="flex-1 px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm font-bold hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+	                                    >
+	                                        上一页
+	                                    </button>
+	                                    <button
+	                                        onClick={() => {
+	                                            const next = pageViewsOffset + pageViewsLimit;
+	                                            setPageViewsOffset(next);
+	                                            fetchGlobalPageViews({ offset: next });
+	                                        }}
+	                                        disabled={globalPageViewsLoading || pageViewsOffset + pageViewsLimit >= globalPageViewsTotal}
+	                                        className="flex-1 px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm font-bold hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+	                                    >
+	                                        下一页
+	                                    </button>
+	                                </div>
+	                            </div>
+
+	                            <div className="mt-4 flex items-center justify-between">
+	                                <div className="text-xs text-gray-400 tabular-nums">
+	                                    {globalPageViewsError ? (
+	                                        <span className="text-red-600 font-bold">{globalPageViewsError}</span>
+	                                    ) : (
+	                                        <span>
+	                                            共 {globalPageViewsTotal.toLocaleString()} 条 · 第 {Math.floor(pageViewsOffset / pageViewsLimit) + 1} /{' '}
+	                                            {Math.max(1, Math.ceil(globalPageViewsTotal / pageViewsLimit))} 页
+	                                        </span>
+	                                    )}
+	                                </div>
+	                                <div className="flex items-center gap-2">
+	                                    <button
+	                                        onClick={() => {
+	                                            setPageViewsQ('');
+	                                            setPageViewsEmail('');
+	                                            setPageViewsFrom('');
+	                                            setPageViewsTo('');
+	                                            setPageViewsOffset(0);
+	                                            fetchGlobalPageViews({ offset: 0 });
+	                                        }}
+	                                        disabled={globalPageViewsLoading}
+	                                        className="px-4 py-2 rounded-xl border border-gray-200 bg-white text-sm font-bold hover:bg-gray-50 disabled:opacity-60"
+	                                    >
+	                                        重置
+	                                    </button>
+	                                    <button
+	                                        onClick={() => {
+	                                            setPageViewsOffset(0);
+	                                            fetchGlobalPageViews({ offset: 0 });
+	                                        }}
+	                                        disabled={globalPageViewsLoading}
+	                                        className="bg-brand-purple text-white px-5 py-2 rounded-xl text-sm font-bold shadow-lg shadow-purple-200 hover:bg-brand-hover active:scale-95 transition-all disabled:opacity-60"
+	                                    >
+	                                        查询
+	                                    </button>
+	                                </div>
+	                            </div>
+	                        </div>
+	
+	                        <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
+	                            <div className="overflow-x-auto">
+	                                <table className="w-full text-sm text-left">
+	                                    <thead className="bg-gray-50 border-b border-gray-100 text-xs text-gray-500 uppercase tracking-wider">
+	                                        <tr>
+                                            <th className="px-4 py-3 text-left">时间</th>
+                                            <th className="px-4 py-3 text-left">用户</th>
+                                            <th className="px-4 py-3 text-left">路径</th>
+                                            <th className="px-4 py-3 text-left">时长</th>
+                                            <th className="px-4 py-3 text-left">Referrer</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-gray-100">
+                                        {globalPageViewsLoading ? (
+                                            <tr>
+                                                <td colSpan={5} className="px-4 py-8 text-center text-gray-400">
+                                                    <RefreshCw size={16} className="inline-block mr-2 animate-spin" />
+                                                    加载中...
+                                                </td>
+                                            </tr>
+                                        ) : globalPageViews.length === 0 ? (
+                                            <tr>
+                                                <td colSpan={5} className="px-4 py-10 text-center text-gray-400">
+                                                    暂无浏览足迹
+                                                </td>
+                                            </tr>
+                                        ) : (
+                                            globalPageViews.map((v) => (
+                                                <tr key={v.id} className="hover:bg-gray-50 transition-colors">
+                                                    <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">
+                                                        {v.createdAt ? new Date(v.createdAt).toLocaleString() : '-'}
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        <div className="text-xs font-bold text-gray-900">{v.user?.email || '-'}</div>
+                                                        <div className="text-[10px] text-gray-400">ID: {v.userId}</div>
+                                                    </td>
+                                                    <td className="px-4 py-3 text-xs text-gray-700 max-w-[420px] truncate" title={v.path}>
+                                                        {v.path}
+                                                    </td>
+                                                    <td className="px-4 py-3 text-xs text-gray-700 tabular-nums whitespace-nowrap">
+                                                        {typeof v.durationSeconds === 'number' ? formatDurationSeconds(v.durationSeconds) : '-'}
+                                                    </td>
+                                                    <td className="px-4 py-3 text-xs text-gray-500 max-w-[360px] truncate" title={v.referrer || ''}>
+                                                        {v.referrer || '-'}
+                                                    </td>
+                                                </tr>
+                                            ))
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
                     </div>
                 );
             case 'logs':
@@ -1098,13 +3422,28 @@ export const AdminPage = ({ onExit }: { onExit: () => void }) => {
                     <button onClick={() => setActiveTab('overview')} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${activeTab === 'overview' ? 'bg-brand-purple text-white shadow-md' : 'text-gray-400 hover:text-white hover:bg-gray-800'}`}>
                         <LayoutDashboard size={18} /> 总览
                     </button>
+                    <button onClick={() => setActiveTab('reports')} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${activeTab === 'reports' ? 'bg-brand-purple text-white shadow-md' : 'text-gray-400 hover:text-white hover:bg-gray-800'}`}>
+                        <BarChart2 size={18} /> 统计排行
+                    </button>
                     <button onClick={() => setActiveTab('users')} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${activeTab === 'users' ? 'bg-brand-purple text-white shadow-md' : 'text-gray-400 hover:text-white hover:bg-gray-800'}`}>
                         <Users size={18} /> 用户管理
+                    </button>
+                    <button onClick={() => setActiveTab('tasks')} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${activeTab === 'tasks' ? 'bg-brand-purple text-white shadow-md' : 'text-gray-400 hover:text-white hover:bg-gray-800'}`}>
+                        <Layers size={18} /> 任务记录
                     </button>
                     
                     <div className="text-xs font-bold text-gray-500 px-3 mt-6 mb-2 uppercase tracking-wider">系统管理</div>
                     <button onClick={() => setActiveTab('engines')} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${activeTab === 'engines' ? 'bg-brand-purple text-white shadow-md' : 'text-gray-400 hover:text-white hover:bg-gray-800'}`}>
                         <Database size={18} /> 引擎中枢
+                    </button>
+                    <button onClick={() => setActiveTab('calls')} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${activeTab === 'calls' ? 'bg-brand-purple text-white shadow-md' : 'text-gray-400 hover:text-white hover:bg-gray-800'}`}>
+                        <Terminal size={18} /> 总调用记录
+                    </button>
+                    <button onClick={() => setActiveTab('billing')} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${activeTab === 'billing' ? 'bg-brand-purple text-white shadow-md' : 'text-gray-400 hover:text-white hover:bg-gray-800'}`}>
+                        <DollarSign size={18} /> 扣费记录
+                    </button>
+                    <button onClick={() => setActiveTab('pageviews')} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${activeTab === 'pageviews' ? 'bg-brand-purple text-white shadow-md' : 'text-gray-400 hover:text-white hover:bg-gray-800'}`}>
+                        <Activity size={18} /> 浏览足迹
                     </button>
                     <button onClick={() => setActiveTab('logs')} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${activeTab === 'logs' ? 'bg-brand-purple text-white shadow-md' : 'text-gray-400 hover:text-white hover:bg-gray-800'}`}>
                         <FileText size={18} /> 审计日志
@@ -1137,9 +3476,14 @@ export const AdminPage = ({ onExit }: { onExit: () => void }) => {
                         <ChevronRight size={14} />
                         <span className="font-bold text-gray-900 capitalize">
                             {activeTab === 'overview' ? '总览' : 
+                             activeTab === 'reports' ? '统计排行' :
                              activeTab === 'users' ? '用户管理' : 
+                             activeTab === 'tasks' ? '任务记录' :
                              activeTab === 'engines' ? '引擎中枢' : 
-                             activeTab === 'logs' ? '日志监控' : '全局配置'}
+                             activeTab === 'calls' ? '总调用记录' :
+                             activeTab === 'billing' ? '扣费记录' :
+                             activeTab === 'pageviews' ? '浏览足迹' :
+                             activeTab === 'logs' ? '审计日志' : '全局配置'}
                         </span>
                     </div>
                     <div className="flex items-center gap-4">
@@ -1195,9 +3539,14 @@ export const AdminPage = ({ onExit }: { onExit: () => void }) => {
                             <div>
                                 <h1 className="text-2xl font-bold text-gray-900 capitalize">
                                     {activeTab === 'overview' ? '仪表盘总览' : 
+                                    activeTab === 'reports' ? '统计排行' :
                                     activeTab === 'users' ? '用户账户管理' : 
+                                    activeTab === 'tasks' ? '全站任务记录' :
                                     activeTab === 'engines' ? 'AI 引擎状态控制' : 
-                                    activeTab === 'logs' ? '系统日志监控' : '全局系统设置'}
+                                    activeTab === 'calls' ? '全站调用记录' :
+                                    activeTab === 'billing' ? '全站扣费记录' :
+                                    activeTab === 'pageviews' ? '全站浏览足迹' :
+                                    activeTab === 'logs' ? '系统审计日志' : '全局系统设置'}
                                 </h1>
                                 <p className="text-gray-500 text-sm mt-1">管理您的应用状态、数据流向及用户权限。</p>
                             </div>
@@ -1208,6 +3557,74 @@ export const AdminPage = ({ onExit }: { onExit: () => void }) => {
                             )}
                         </div>
                         {renderContent()}
+
+                        {globalRunDetail && (
+                            <div className="fixed inset-0 z-[80] flex items-center justify-center p-4">
+                                <div className="absolute inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setGlobalRunDetail(null)}></div>
+                                <div className="relative w-full max-w-3xl bg-white rounded-2xl shadow-2xl border border-gray-200 overflow-hidden flex flex-col max-h-[80vh]">
+                                    <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+                                        <div className="font-bold text-gray-900">调用详情</div>
+                                        <button onClick={() => setGlobalRunDetail(null)} className="text-gray-400 hover:text-gray-600">
+                                            <X size={18} />
+                                        </button>
+                                    </div>
+                                    <div className="p-6 overflow-y-auto space-y-4">
+                                        <div className="text-xs text-gray-500">
+                                            RunID: <span className="font-mono text-gray-700">{globalRunDetail.id}</span>
+                                        </div>
+                                        {globalRunDetail.error && (
+                                            <div className="p-3 rounded-xl border border-red-100 bg-red-50 text-xs text-red-700 whitespace-pre-wrap">
+                                                {globalRunDetail.error}
+                                            </div>
+                                        )}
+                                        {(globalRunDetail.prompt || globalRunDetail.responseText || globalRunDetail.responseJson) && (
+                                            <pre className="text-xs bg-gray-50 border border-gray-100 rounded-xl p-4 overflow-x-auto whitespace-pre-wrap">
+                                                {JSON.stringify(
+                                                    {
+                                                        taskId: globalRunDetail.taskId,
+                                                        modelKey: globalRunDetail.modelKey,
+                                                        provider: globalRunDetail.provider,
+                                                        modelName: globalRunDetail.modelName,
+                                                        purpose: globalRunDetail.purpose,
+                                                        status: globalRunDetail.status,
+                                                        startedAt: globalRunDetail.startedAt,
+                                                        completedAt: globalRunDetail.completedAt,
+                                                        prompt: globalRunDetail.prompt,
+                                                        responseText: globalRunDetail.responseText,
+                                                        responseJson: globalRunDetail.responseJson,
+                                                    },
+                                                    null,
+                                                    2
+                                                )}
+                                            </pre>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {globalTaskDetail && (
+                            <div className="fixed inset-0 z-[80] flex items-center justify-center p-4">
+                                <div className="absolute inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setGlobalTaskDetail(null)}></div>
+                                <div className="relative w-full max-w-3xl bg-white rounded-2xl shadow-2xl border border-gray-200 overflow-hidden flex flex-col max-h-[80vh]">
+                                    <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+                                        <div className="font-bold text-gray-900">任务详情 / 报告</div>
+                                        <button onClick={() => setGlobalTaskDetail(null)} className="text-gray-400 hover:text-gray-600">
+                                            <X size={18} />
+                                        </button>
+                                    </div>
+                                    <div className="p-6 overflow-y-auto space-y-3">
+                                        <div className="text-xs text-gray-500">
+                                            任务ID: <span className="font-mono text-gray-700">{globalTaskDetail.id}</span>
+                                        </div>
+                                        <div className="text-sm font-bold text-gray-900">{globalTaskDetail.keyword}</div>
+                                        <pre className="text-xs bg-gray-50 border border-gray-100 rounded-xl p-4 overflow-x-auto whitespace-pre-wrap">
+                                            {JSON.stringify(globalTaskDetail.result || globalTaskDetail, null, 2)}
+                                        </pre>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </main>
             </div>

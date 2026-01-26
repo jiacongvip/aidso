@@ -1,10 +1,10 @@
 const { PrismaClient } = require('@prisma/client');
-const crypto = require('crypto');
+const nodeCrypto = require('crypto');
 const prisma = new PrismaClient();
 
 function hashPassword(password: string) {
-  const salt = crypto.randomBytes(16).toString('hex');
-  const derivedKey = crypto.scryptSync(password, salt, 64).toString('hex');
+  const salt = nodeCrypto.randomBytes(16).toString('hex');
+  const derivedKey = nodeCrypto.scryptSync(password, salt, 64).toString('hex');
   return `scrypt$${salt}$${derivedKey}`;
 }
 

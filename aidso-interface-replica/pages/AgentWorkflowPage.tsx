@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { useTasks } from '../contexts/TaskContext';
 import { TargetSite, StrategyStep } from '../utils';
+import { apiJson } from '../services/api';
 
 // Component for Model Evidence Chain
 const ModelEvidenceSection = ({ task }: { task: any }) => {
@@ -248,6 +249,7 @@ export const AgentWorkflowPage = () => {
     setChatHistory(prev => [...prev, userMessage]);
     setRightPanelTab('chat'); // 自动切换到对话视图
     const currentQuestion = followUpQuestion;
+    const currentHistory = [...chatHistory, userMessage];
     setFollowUpQuestion(''); // 清空输入框
     setIsAsking(true);
     
@@ -264,28 +266,24 @@ export const AgentWorkflowPage = () => {
       const fullContext = context + modelResponses;
       
       // 调用后端 AI 接口
-      const response = await fetch('/api/ai/follow-up', {
+      const { res, data } = await apiJson<{ answer?: string }>('/api/ai/follow-up', {
         method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           context: fullContext,
           question: currentQuestion,
           originalKeyword: activeTask.keyword,
-          chatHistory: chatHistory // 传递历史对话
+          chatHistory: currentHistory // 传递历史对话（包含本次提问）
         })
       });
       
-      if (!response.ok) {
-        throw new Error('追问失败');
+      if (!res.ok) {
+        throw new Error((data as any)?.error || (data as any)?.message || '追问失败');
       }
       
-      const data = await response.json();
       const assistantMessage: ChatMessage = {
         role: 'assistant',
-        content: data.answer || '暂无回答',
+        content: data?.answer || '暂无回答',
         timestamp: Date.now()
       };
       
@@ -1121,26 +1119,115 @@ export const AgentWorkflowPage = () => {
                      </div>
                  )}
                  
-                 {/* Empty State (For Report when no result) */}
+                 {/* Running State (For Report when no result yet) */}
                  {!activeTask.result && rightPanelTab === 'report' && (
-                     <div className="flex flex-col items-center justify-center h-[70vh] text-gray-400 space-y-6 animate-fade-in">
-                        <div className="relative">
-                            <div className="absolute inset-0 bg-brand-purple/20 blur-2xl rounded-full animate-pulse-slow"></div>
-                            <div className="w-24 h-24 bg-white rounded-2xl shadow-xl flex items-center justify-center relative z-10 border border-gray-100">
-                                <Bot size={48} className="text-brand-purple animate-bounce-subtle" />
+                     <div className="space-y-6 animate-fade-in">
+                        {/* 执行状态卡片 */}
+                        <div className="bg-white rounded-2xl shadow-sm border border-gray-200/60 overflow-hidden">
+                            <div className="p-6 border-b border-gray-100 bg-gradient-to-r from-purple-50 to-white">
+                                <div className="flex items-center gap-4">
+                                    <div className="relative">
+                                        <div className="w-16 h-16 bg-brand-purple rounded-2xl flex items-center justify-center shadow-lg shadow-purple-200">
+                                            <Bot size={32} className="text-white" />
+                                        </div>
+                                        {activeTask.status === 'running' && (
+                                            <div className="absolute -bottom-1 -right-1 w-5 h-5 bg-green-500 rounded-full border-2 border-white flex items-center justify-center">
+                                                <Loader2 size={10} className="text-white animate-spin" />
+                                            </div>
+                                        )}
+                                    </div>
+                                    <div className="flex-1">
+                                        <h2 className="text-xl font-bold text-gray-900 mb-1">
+                                            {activeTask.status === 'running' ? '🚀 Agent 正在执行调研...' : '⏳ 任务准备中...'}
+                                        </h2>
+                                        <p className="text-sm text-gray-500">
+                                            关键词：<span className="font-bold text-brand-purple">{activeTask.keyword}</span>
+                                        </p>
+                                    </div>
+                                </div>
                             </div>
-                            {/* Orbiting Icons */}
-                            <div className="absolute top-0 right-0 -mr-4 -mt-4 bg-white p-2 rounded-lg shadow-sm animate-float" style={{animationDelay: '0s'}}>
-                                <Search size={16} className="text-blue-500" />
+
+                            {/* 进度条 */}
+                            <div className="px-6 py-4 bg-gray-50/50">
+                                <div className="flex items-center justify-between text-sm mb-2">
+                                    <span className="text-gray-600 font-medium">执行进度</span>
+                                    <span className="text-brand-purple font-bold">{activeTask.progress || 0}%</span>
+                                </div>
+                                <div className="w-full h-3 bg-gray-200 rounded-full overflow-hidden">
+                                    <div 
+                                        className="h-full bg-gradient-to-r from-brand-purple to-purple-400 rounded-full transition-all duration-500 ease-out"
+                                        style={{ width: `${activeTask.progress || 0}%` }}
+                                    ></div>
+                                </div>
                             </div>
-                            <div className="absolute bottom-0 left-0 -ml-4 -mb-4 bg-white p-2 rounded-lg shadow-sm animate-float" style={{animationDelay: '1s'}}>
-                                <BarChart3 size={16} className="text-green-500" />
+
+                            {/* 执行日志 */}
+                            <div className="p-6">
+                                <h3 className="text-sm font-bold text-gray-700 mb-3 flex items-center gap-2">
+                                    <FileText size={14} />
+                                    执行日志
+                                </h3>
+                                <div className="bg-gray-900 rounded-xl p-4 max-h-[300px] overflow-y-auto custom-scrollbar">
+                                    {activeTask.logs && activeTask.logs.length > 0 ? (
+                                        <div className="space-y-2">
+                                            {activeTask.logs.map((log, idx) => (
+                                                <div key={idx} className="flex items-start gap-2 text-sm">
+                                                    <span className="text-gray-500 font-mono text-xs flex-shrink-0">
+                                                        [{String(idx + 1).padStart(2, '0')}]
+                                                    </span>
+                                                    <span className={`${
+                                                        log.includes('✅') ? 'text-green-400' :
+                                                        log.includes('❌') ? 'text-red-400' :
+                                                        log.includes('⚠️') ? 'text-yellow-400' :
+                                                        log.includes('🤖') || log.includes('🧠') ? 'text-blue-400' :
+                                                        log.includes('🔍') || log.includes('🏷️') ? 'text-purple-400' :
+                                                        'text-gray-300'
+                                                    }`}>
+                                                        {log}
+                                                    </span>
+                                                </div>
+                                            ))}
+                                            {activeTask.status === 'running' && (
+                                                <div className="flex items-center gap-2 text-gray-400 text-sm mt-2">
+                                                    <Loader2 size={12} className="animate-spin" />
+                                                    <span>等待下一步...</span>
+                                                </div>
+                                            )}
+                                        </div>
+                                    ) : (
+                                        <div className="text-gray-500 text-sm">等待任务开始...</div>
+                                    )}
+                                </div>
                             </div>
                         </div>
-                        <div className="text-center space-y-2">
-                            <h3 className="text-lg font-bold text-gray-900">Agent 正在深度调研中...</h3>
-                            <p className="text-sm text-gray-500">正在分析全网数据、对比模型共识、挖掘潜在渠道</p>
+
+                        {/* 预计完成提示 */}
+                        <div className="bg-gradient-to-r from-blue-50 to-purple-50 rounded-xl p-4 border border-blue-100 flex items-center gap-4">
+                            <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center flex-shrink-0">
+                                <Zap size={20} className="text-blue-600" />
+                            </div>
+                            <div>
+                                <h4 className="font-bold text-gray-800 text-sm">深度调研需要一点时间</h4>
+                                <p className="text-xs text-gray-500 mt-0.5">
+                                    系统正在调用多个 AI 模型进行交叉验证，预计需要 30-60 秒完成
+                                </p>
+                            </div>
                         </div>
+
+                        {/* 选择的模型 */}
+                        {activeTask.selectedModels && activeTask.selectedModels.length > 0 && (
+                            <div className="bg-white rounded-xl p-4 border border-gray-200">
+                                <h3 className="text-sm font-bold text-gray-700 mb-3">正在调用的模型</h3>
+                                <div className="flex flex-wrap gap-2">
+                                    {activeTask.selectedModels.map((model: string, idx: number) => (
+                                        <div key={idx} className="flex items-center gap-2 bg-gray-100 px-3 py-1.5 rounded-lg">
+                                            <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+                                            <span className="text-sm font-medium text-gray-700">{model}</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
                      </div>
                  )}
              </div>

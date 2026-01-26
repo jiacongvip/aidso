@@ -217,11 +217,255 @@ function calculateTaskCostUnits(params: {
   return base * multiplier;
 }
 
+function httpError(status: number, payload: any) {
+  const err: any = new Error(typeof payload?.error === 'string' ? payload.error : 'Request failed');
+  err.status = status;
+  err.payload = payload;
+  return err;
+}
+
+function csvEscape(value: any) {
+  if (value === null || value === undefined) return '';
+  const s =
+    value instanceof Date
+      ? value.toISOString()
+      : typeof value === 'string'
+        ? value
+        : typeof value === 'number' || typeof value === 'boolean'
+          ? String(value)
+          : (() => {
+              try {
+                return JSON.stringify(value);
+              } catch {
+                return String(value);
+              }
+            })();
+
+  const needsQuotes = /[",\n\r]/.test(s);
+  const escaped = s.replace(/"/g, '""');
+  return needsQuotes ? `"${escaped}"` : escaped;
+}
+
+function toCsv(headers: string[], rows: any[][]) {
+  const lines = [headers.map(csvEscape).join(','), ...rows.map((r) => r.map(csvEscape).join(','))];
+  // Excel-friendly UTF-8 BOM
+  return `\ufeff${lines.join('\n')}`;
+}
+
+function parseDateShanghai(input: any, opts?: { endOfDay?: boolean }) {
+  if (typeof input !== 'string') return null;
+  const s = input.trim();
+  if (!s) return null;
+
+  // Date-only: interpret as Asia/Shanghai to avoid UTC offset surprises.
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (dateOnly) {
+    const [, y, m, d] = dateOnly;
+    const time = opts?.endOfDay ? '23:59:59.999' : '00:00:00.000';
+    const iso = `${y}-${m}-${d}T${time}+08:00`;
+    const parsed = new Date(iso);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  const parsed = new Date(s);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function parseDateRangeShanghai(params: { from?: any; to?: any }) {
+  const from = parseDateShanghai(params.from);
+  const to = parseDateShanghai(params.to, { endOfDay: typeof params.to === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(params.to.trim()) });
+  return { from, to };
+}
+
 app.use(cors());
 app.use(express.json());
 
+async function createTaskForUser(params: {
+  user: any;
+  keyword: any;
+  searchType: any;
+  models: any;
+  monitoringProjectId?: string | null;
+}) {
+  const user = params.user;
+  const keyword = params.keyword;
+  const searchType = params.searchType;
+  const models = params.models;
+
+  if (!keyword || typeof keyword !== 'string') {
+    throw httpError(400, { error: 'Keyword is required' });
+  }
+  const normalizedSearchType = searchType === 'deep' ? 'deep' : 'quick';
+  const selectedModels = Array.isArray(models) ? models.filter((m: any) => typeof m === 'string') : [];
+  if (selectedModels.length === 0) {
+    throw httpError(400, { error: 'At least one model is required' });
+  }
+
+  const config = readAppConfig();
+  const billing = getBillingConfig(config);
+  const usageDate = getShanghaiUsageDate();
+  const plan = user.membership?.plan || 'FREE';
+  const dailyLimit = billing.dailyUnitsByPlan?.[plan] ?? billing.dailyUnitsByPlan.FREE;
+
+  const estimatedCost = calculateTaskCostUnits({
+    selectedModels,
+    searchType: normalizedSearchType,
+    billing,
+  });
+  const costUnits = Math.max(1, Math.ceil(Number.isFinite(estimatedCost) ? estimatedCost : selectedModels.length));
+
+  const hasUsableProvider = selectedModels.some((modelKey) => {
+    const picked = pickNewApiConfigForModel(config, modelKey);
+    const cfg = (picked as any)?.cfg;
+    return (
+      typeof cfg?.baseUrl === 'string' &&
+      cfg.baseUrl.trim() &&
+      typeof cfg?.apiKey === 'string' &&
+      cfg.apiKey.trim()
+    );
+  });
+
+  if (!hasUsableProvider) {
+    const platformData: Record<string, any> = Object.fromEntries(
+      selectedModels.map((k) => [
+        k,
+        {
+          engine: 'unconfigured',
+          thinking: '',
+          response: '⚠️ NewAPI 未配置（baseUrl/apiKey 为空），任务未执行。\n\n请管理员先到 /admin 配置 NewAPI。',
+          sources: [],
+        },
+      ])
+    );
+
+    const task = await prisma.task.create({
+      data: {
+        keyword,
+        status: 'FAILED',
+        progress: 100,
+        logs: [
+          '🚀 任务已创建',
+          '⚠️ NewAPI 未配置：请先在后台填写 baseUrl / apiKey 并启用模型源（/admin → 权限与配置 → 多模型接口配置）',
+        ],
+        searchType: normalizedSearchType,
+        selectedModels,
+        costUnits: 0,
+        quotaUnits: 0,
+        pointsUnits: 0,
+        usageDate,
+        userId: user.id,
+        ...(params.monitoringProjectId ? { monitoringProjectId: params.monitoringProjectId } : {}),
+        result: {
+          summary: 'NewAPI 未配置，任务未执行',
+          analysis: { summary: 'NewAPI 未配置（baseUrl/apiKey 为空），无法调用模型。' },
+          platformData,
+        } as any,
+      },
+    });
+
+    return { task, started: false, remainingPoints: user.points || 0 };
+  }
+
+  // 计算当日免费配额剩余
+  const usageAgg = await prisma.task.aggregate({
+    where: { userId: user.id, usageDate },
+    _sum: { quotaUnits: true },
+  });
+  const usedQuotaUnits = usageAgg._sum?.quotaUnits || 0;
+  const remainingQuotaUnits = Math.max(0, dailyLimit - usedQuotaUnits);
+
+  const quotaUnitsToCharge = Math.min(costUnits, remainingQuotaUnits);
+  const pointsUnitsToCharge = costUnits - quotaUnitsToCharge;
+
+  // 检查用户点数是否足够（超出免费额度才扣点）
+  const currentUser = await prisma.user.findUnique({ where: { id: user.id } });
+  if (!currentUser) {
+    throw httpError(401, { error: 'Unauthorized' });
+  }
+  if (pointsUnitsToCharge > 0 && (currentUser.points || 0) < pointsUnitsToCharge) {
+    throw httpError(403, {
+      error: '点数不足',
+      message: `本次任务需要 ${costUnits} 次（免费额度抵扣 ${quotaUnitsToCharge} 次，需扣点 ${pointsUnitsToCharge} 点），您当前余额为 ${
+        currentUser.points || 0
+      } 点`,
+      requiredPoints: pointsUnitsToCharge,
+      currentPoints: currentUser.points || 0,
+      dailyLimit,
+      usedQuotaUnits,
+      remainingQuotaUnits,
+      costUnits,
+    });
+  }
+
+  // 使用事务：扣点 + 创建任务
+  const result = await prisma.$transaction(async (tx) => {
+    let updatedPoints = currentUser.points || 0;
+    if (pointsUnitsToCharge > 0) {
+      const updatedUser = await tx.user.update({
+        where: { id: user.id },
+        data: { points: { decrement: pointsUnitsToCharge } },
+      });
+      updatedPoints = updatedUser.points;
+
+      await tx.pointsLog.create({
+        data: {
+          userId: user.id,
+          amount: -pointsUnitsToCharge,
+          balance: updatedUser.points,
+          type: 'CONSUME',
+          description: `执行任务: ${keyword.substring(0, 50)}`,
+        },
+      });
+    }
+
+    // 创建任务
+    const logs: string[] = ['🚀 任务已创建，准备启动调研...'];
+    if (quotaUnitsToCharge > 0) {
+      logs.push(
+        `🎟️ 已使用今日免费额度 ${quotaUnitsToCharge} 次（${usageDate}：已用 ${Math.min(
+          dailyLimit,
+          usedQuotaUnits + quotaUnitsToCharge
+        )}/${dailyLimit}）`
+      );
+    }
+    if (pointsUnitsToCharge > 0) {
+      logs.push(`💰 已扣除 ${pointsUnitsToCharge} 点，当前余额：${updatedPoints} 点`);
+    } else {
+      logs.push('✅ 本次未扣除点数');
+    }
+
+    const task = await tx.task.create({
+      data: {
+        keyword,
+        status: 'PENDING',
+        logs,
+        searchType: normalizedSearchType,
+        selectedModels,
+        costUnits,
+        quotaUnits: quotaUnitsToCharge,
+        pointsUnits: pointsUnitsToCharge,
+        usageDate,
+        userId: user.id,
+        ...(params.monitoringProjectId ? { monitoringProjectId: params.monitoringProjectId } : {}),
+      },
+    });
+
+    return { task, remainingPoints: updatedPoints };
+  });
+
+  // Trigger background processing (simulate async)
+  simulateTaskProcessing(result.task.id, keyword, selectedModels, normalizedSearchType);
+
+  return { task: result.task, started: true, remainingPoints: result.remainingPoints };
+}
+
 // Basic health check
 app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date() });
+});
+
+// Health check via /api prefix (for frontend proxy self-test)
+app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date() });
 });
 
@@ -253,15 +497,816 @@ app.get('/api/billing/summary', requireAuth(), async (req, res) => {
 
     const usageAgg = await prisma.task.aggregate({
       where: { userId: user.id, usageDate },
-      _sum: { costUnits: true },
+      _sum: { quotaUnits: true },
     });
-    const usedUnits = usageAgg._sum?.costUnits || 0;
+    const usedUnits = usageAgg._sum?.quotaUnits || 0;
     const remainingUnits = Math.max(0, dailyLimit - usedUnits);
 
     res.json({ usageDate, plan, dailyLimit, usedUnits, remainingUnits });
   } catch (err) {
     console.error('Failed to get billing summary', err);
     res.status(500).json({ error: 'Failed to get billing summary' });
+  }
+});
+
+// --- Personal Center Insights ---
+
+app.get('/api/me/insights', requireAuth(), async (req, res) => {
+  const user = (req as any).user;
+  try {
+    const now = new Date();
+    const since7d = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+    const [totalTasks, tasks7d, sum7d] = await Promise.all([
+      prisma.task.count({ where: { userId: user.id } }),
+      prisma.task.count({ where: { userId: user.id, createdAt: { gte: since7d } } }),
+      prisma.task.aggregate({
+        where: { userId: user.id, createdAt: { gte: since7d } },
+        _sum: { costUnits: true, quotaUnits: true, pointsUnits: true },
+      }),
+    ]);
+
+    const recentTasks = await prisma.task.findMany({
+      where: { userId: user.id, createdAt: { gte: since7d } },
+      orderBy: { createdAt: 'desc' },
+      take: 200,
+      select: { selectedModels: true, searchType: true },
+    });
+
+    const modelUsage: Record<string, number> = {};
+    let deepCount = 0;
+    let quickCount = 0;
+    for (const t of recentTasks) {
+      const type = t.searchType === 'deep' ? 'deep' : 'quick';
+      if (type === 'deep') deepCount += 1;
+      else quickCount += 1;
+
+      const models = Array.isArray(t.selectedModels) ? (t.selectedModels as any[]) : [];
+      for (const m of models) {
+        if (typeof m !== 'string') continue;
+        modelUsage[m] = (modelUsage[m] || 0) + 1;
+      }
+    }
+
+    const mentions = await prisma.brandMention.findMany({
+      where: { brandKeyword: { userId: user.id }, createdAt: { gte: since7d } },
+      select: {
+        mentionCount: true,
+        sentiment: true,
+        brandKeyword: { select: { keyword: true, isOwn: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 2000,
+    });
+
+    const ownCounts: Record<string, number> = {};
+    const competitorCounts: Record<string, number> = {};
+    const sentimentCounts = { positive: 0, negative: 0, neutral: 0 };
+    for (const m of mentions) {
+      const key = m.brandKeyword.keyword;
+      const delta = typeof m.mentionCount === 'number' ? m.mentionCount : 0;
+      if (m.brandKeyword.isOwn) ownCounts[key] = (ownCounts[key] || 0) + delta;
+      else competitorCounts[key] = (competitorCounts[key] || 0) + delta;
+
+      const s = String(m.sentiment || '').toLowerCase();
+      if (s === 'positive') sentimentCounts.positive += 1;
+      else if (s === 'negative') sentimentCounts.negative += 1;
+      else sentimentCounts.neutral += 1;
+    }
+
+    const topOwn = Object.entries(ownCounts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([keyword, count]) => ({ keyword, count }));
+    const topCompetitors = Object.entries(competitorCounts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([keyword, count]) => ({ keyword, count }));
+
+    res.json({
+      rangeDays: 7,
+      tasks: {
+        total: totalTasks,
+        last7d: tasks7d,
+        quick: quickCount,
+        deep: deepCount,
+      },
+      cost: {
+        costUnits7d: sum7d._sum?.costUnits || 0,
+        quotaUnits7d: sum7d._sum?.quotaUnits || 0,
+        pointsUnits7d: sum7d._sum?.pointsUnits || 0,
+      },
+      modelUsage,
+      brandMentions: {
+        sentimentCounts,
+        topOwn,
+        topCompetitors,
+      },
+    });
+  } catch (err) {
+    console.error('Failed to get /api/me/insights', err);
+    res.status(500).json({ error: 'Failed to get insights' });
+  }
+});
+
+// --- Personal Center Data APIs ---
+
+app.get('/api/me/tasks', requireAuth(), async (req, res) => {
+  const user = (req as any).user;
+
+  const rawLimit = Array.isArray((req.query as any).limit) ? (req.query as any).limit[0] : (req.query as any).limit;
+  const limit = Math.min(200, Math.max(1, Number.parseInt(String(rawLimit || '50'), 10) || 50));
+
+  const rawOffset = Array.isArray((req.query as any).offset) ? (req.query as any).offset[0] : (req.query as any).offset;
+  const offset = Math.min(50000, Math.max(0, Number.parseInt(String(rawOffset || '0'), 10) || 0));
+
+  const rawStatus = Array.isArray((req.query as any).status) ? (req.query as any).status[0] : (req.query as any).status;
+  const status =
+    rawStatus === 'PENDING' || rawStatus === 'RUNNING' || rawStatus === 'COMPLETED' || rawStatus === 'FAILED'
+      ? rawStatus
+      : null;
+
+  const rawSearchType = Array.isArray((req.query as any).searchType) ? (req.query as any).searchType[0] : (req.query as any).searchType;
+  const searchType = rawSearchType === 'quick' || rawSearchType === 'deep' ? rawSearchType : null;
+
+  const rawModelKey = Array.isArray((req.query as any).modelKey) ? (req.query as any).modelKey[0] : (req.query as any).modelKey;
+  const modelKey = typeof rawModelKey === 'string' ? rawModelKey.trim() : '';
+
+  const rawQ = Array.isArray((req.query as any).q) ? (req.query as any).q[0] : (req.query as any).q;
+  const q = typeof rawQ === 'string' ? rawQ.trim() : '';
+
+  const rawFrom = Array.isArray((req.query as any).from) ? (req.query as any).from[0] : (req.query as any).from;
+  const rawTo = Array.isArray((req.query as any).to) ? (req.query as any).to[0] : (req.query as any).to;
+  const { from, to } = parseDateRangeShanghai({ from: rawFrom, to: rawTo });
+
+  try {
+    const where: any = { userId: user.id };
+    if (status) where.status = status;
+    if (searchType) where.searchType = searchType;
+    if (from || to) where.createdAt = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+    if (modelKey) where.modelRuns = { some: { modelKey: { contains: modelKey, mode: 'insensitive' } } };
+    if (q) {
+      where.OR = [
+        { keyword: { contains: q, mode: 'insensitive' } },
+        { modelRuns: { some: { modelKey: { contains: q, mode: 'insensitive' } } } },
+      ];
+    }
+
+    const [total, tasks] = await Promise.all([
+      prisma.task.count({ where }),
+      prisma.task.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+        skip: offset,
+        select: {
+          id: true,
+          keyword: true,
+          status: true,
+          progress: true,
+          searchType: true,
+          selectedModels: true,
+          costUnits: true,
+          quotaUnits: true,
+          pointsUnits: true,
+          usageDate: true,
+          createdAt: true,
+          result: true,
+          logs: true,
+          _count: { select: { modelRuns: true } },
+        },
+      }),
+    ]);
+
+    const items = tasks.map((t) => {
+      const result: any = (t as any).result;
+      const resultSummary = typeof result?.summary === 'string' ? result.summary : null;
+      const analysisSummary = typeof result?.analysis?.summary === 'string' ? result.analysis.summary : null;
+      const lastLog = Array.isArray(t.logs) && t.logs.length > 0 ? String(t.logs[t.logs.length - 1]) : null;
+      return {
+        id: t.id,
+        keyword: t.keyword,
+        status: t.status,
+        progress: t.progress,
+        searchType: t.searchType,
+        selectedModels: t.selectedModels,
+        costUnits: t.costUnits,
+        quotaUnits: t.quotaUnits,
+        pointsUnits: t.pointsUnits,
+        usageDate: t.usageDate,
+        createdAt: t.createdAt,
+        modelRunsCount: t._count.modelRuns,
+        resultSummary,
+        analysisSummary,
+        lastLog,
+      };
+    });
+
+    res.json({ total, limit, offset, items });
+  } catch (error) {
+    console.error('Failed to get tasks (me)', error);
+    res.status(500).json({ error: 'Failed to get tasks' });
+  }
+});
+
+app.get('/api/me/runs', requireAuth(), async (req, res) => {
+  const user = (req as any).user;
+
+  const rawLimit = Array.isArray((req.query as any).limit) ? (req.query as any).limit[0] : (req.query as any).limit;
+  const limit = Math.min(500, Math.max(1, Number.parseInt(String(rawLimit || '100'), 10) || 100));
+
+  const rawOffset = Array.isArray((req.query as any).offset) ? (req.query as any).offset[0] : (req.query as any).offset;
+  const offset = Math.min(50000, Math.max(0, Number.parseInt(String(rawOffset || '0'), 10) || 0));
+
+  const rawPurpose = Array.isArray((req.query as any).purpose) ? (req.query as any).purpose[0] : (req.query as any).purpose;
+  const purpose = rawPurpose === 'MODEL' || rawPurpose === 'ANALYSIS' ? rawPurpose : null;
+
+  const rawStatus = Array.isArray((req.query as any).status) ? (req.query as any).status[0] : (req.query as any).status;
+  const status =
+    rawStatus === 'PENDING' || rawStatus === 'RUNNING' || rawStatus === 'SUCCEEDED' || rawStatus === 'FAILED'
+      ? rawStatus
+      : null;
+
+  const rawTaskId = Array.isArray((req.query as any).taskId) ? (req.query as any).taskId[0] : (req.query as any).taskId;
+  const taskId = typeof rawTaskId === 'string' ? rawTaskId.trim() : '';
+
+  const rawModelKey = Array.isArray((req.query as any).modelKey) ? (req.query as any).modelKey[0] : (req.query as any).modelKey;
+  const modelKey = typeof rawModelKey === 'string' ? rawModelKey.trim() : '';
+
+  const rawQ = Array.isArray((req.query as any).q) ? (req.query as any).q[0] : (req.query as any).q;
+  const q = typeof rawQ === 'string' ? rawQ.trim() : '';
+
+  const rawFrom = Array.isArray((req.query as any).from) ? (req.query as any).from[0] : (req.query as any).from;
+  const rawTo = Array.isArray((req.query as any).to) ? (req.query as any).to[0] : (req.query as any).to;
+  const { from, to } = parseDateRangeShanghai({ from: rawFrom, to: rawTo });
+
+  try {
+    const where: any = { task: { userId: user.id } };
+    if (purpose) where.purpose = purpose;
+    if (status) where.status = status;
+    if (taskId) where.taskId = taskId;
+    if (modelKey) where.modelKey = { contains: modelKey, mode: 'insensitive' };
+    if (from || to) where.createdAt = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+    if (q) {
+      where.OR = [
+        { task: { keyword: { contains: q, mode: 'insensitive' } } },
+        { modelKey: { contains: q, mode: 'insensitive' } },
+        { provider: { contains: q, mode: 'insensitive' } },
+        { modelName: { contains: q, mode: 'insensitive' } },
+      ];
+    }
+
+    const [total, runs] = await Promise.all([
+      prisma.taskModelRun.count({ where }),
+      prisma.taskModelRun.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+        skip: offset,
+        select: {
+          id: true,
+          taskId: true,
+          task: { select: { keyword: true, searchType: true, createdAt: true } },
+          modelKey: true,
+          provider: true,
+          modelName: true,
+          purpose: true,
+          status: true,
+          error: true,
+          startedAt: true,
+          completedAt: true,
+          createdAt: true,
+          responseText: true,
+        },
+      }),
+    ]);
+
+    const items = runs.map((r) => {
+      const latencyMs =
+        r.startedAt && r.completedAt ? Math.max(0, r.completedAt.getTime() - r.startedAt.getTime()) : null;
+      const responsePreview = typeof r.responseText === 'string' ? r.responseText.slice(0, 1200) : null;
+      return {
+        id: r.id,
+        taskId: r.taskId,
+        taskKeyword: r.task.keyword,
+        taskSearchType: r.task.searchType,
+        modelKey: r.modelKey,
+        provider: r.provider,
+        modelName: r.modelName,
+        purpose: r.purpose,
+        status: r.status,
+        error: r.error,
+        startedAt: r.startedAt,
+        completedAt: r.completedAt,
+        createdAt: r.createdAt,
+        latencyMs,
+        responsePreview,
+      };
+    });
+
+    res.json({ total, limit, offset, items });
+  } catch (error) {
+    console.error('Failed to get runs (me)', error);
+    res.status(500).json({ error: 'Failed to get runs' });
+  }
+});
+
+app.get('/api/me/runs/:id', requireAuth(), async (req, res) => {
+  const user = (req as any).user;
+  const rawId = (req.params as any).id as string | string[] | undefined;
+  const id = Array.isArray(rawId) ? rawId[0] : rawId;
+  if (!id) return res.status(400).json({ error: 'Invalid run id' });
+
+  try {
+    const run = await prisma.taskModelRun.findUnique({
+      where: { id },
+      include: { task: { select: { id: true, keyword: true, userId: true, searchType: true, createdAt: true } } },
+    });
+    if (!run || run.task.userId !== user.id) return res.status(404).json({ error: 'Run not found' });
+    res.json(run);
+  } catch (error) {
+    console.error('Failed to get run (me)', error);
+    res.status(500).json({ error: 'Failed to get run' });
+  }
+});
+
+app.get('/api/me/points-logs', requireAuth(), async (req, res) => {
+  const user = (req as any).user;
+
+  const rawLimit = Array.isArray((req.query as any).limit) ? (req.query as any).limit[0] : (req.query as any).limit;
+  const limit = Math.min(500, Math.max(1, Number.parseInt(String(rawLimit || '100'), 10) || 100));
+
+  const rawOffset = Array.isArray((req.query as any).offset) ? (req.query as any).offset[0] : (req.query as any).offset;
+  const offset = Math.min(50000, Math.max(0, Number.parseInt(String(rawOffset || '0'), 10) || 0));
+
+  const rawType = Array.isArray((req.query as any).type) ? (req.query as any).type[0] : (req.query as any).type;
+  const type =
+    rawType === 'RECHARGE' ||
+    rawType === 'CONSUME' ||
+    rawType === 'ADMIN_ADD' ||
+    rawType === 'ADMIN_SUB' ||
+    rawType === 'REFUND'
+      ? rawType
+      : null;
+
+  const rawQ = Array.isArray((req.query as any).q) ? (req.query as any).q[0] : (req.query as any).q;
+  const q = typeof rawQ === 'string' ? rawQ.trim() : '';
+
+  const rawFrom = Array.isArray((req.query as any).from) ? (req.query as any).from[0] : (req.query as any).from;
+  const rawTo = Array.isArray((req.query as any).to) ? (req.query as any).to[0] : (req.query as any).to;
+  const { from, to } = parseDateRangeShanghai({ from: rawFrom, to: rawTo });
+
+  try {
+    const where: any = { userId: user.id };
+    if (type) where.type = type;
+    if (from || to) where.createdAt = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+    if (q) {
+      where.OR = [
+        { description: { contains: q, mode: 'insensitive' } },
+        { type: { equals: q } },
+      ];
+    }
+
+    const [total, logs] = await Promise.all([
+      prisma.pointsLog.count({ where }),
+      prisma.pointsLog.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+        skip: offset,
+      }),
+    ]);
+
+    res.json({
+      total,
+      limit,
+      offset,
+      items: logs.map((l) => ({
+        id: l.id,
+        amount: l.amount,
+        balance: l.balance,
+        type: l.type,
+        description: l.description,
+        operatorId: l.operatorId,
+        createdAt: l.createdAt,
+      })),
+    });
+  } catch (error) {
+    console.error('Failed to get points logs (me)', error);
+    res.status(500).json({ error: 'Failed to get points logs' });
+  }
+});
+
+app.get('/api/me/pageviews', requireAuth(), async (req, res) => {
+  const user = (req as any).user;
+
+  const rawLimit = Array.isArray((req.query as any).limit) ? (req.query as any).limit[0] : (req.query as any).limit;
+  const limit = Math.min(500, Math.max(1, Number.parseInt(String(rawLimit || '100'), 10) || 100));
+
+  const rawOffset = Array.isArray((req.query as any).offset) ? (req.query as any).offset[0] : (req.query as any).offset;
+  const offset = Math.min(50000, Math.max(0, Number.parseInt(String(rawOffset || '0'), 10) || 0));
+
+  const rawPath = Array.isArray((req.query as any).path) ? (req.query as any).path[0] : (req.query as any).path;
+  const path = typeof rawPath === 'string' ? rawPath.trim() : '';
+
+  const rawSessionId = Array.isArray((req.query as any).sessionId) ? (req.query as any).sessionId[0] : (req.query as any).sessionId;
+  const sessionId = typeof rawSessionId === 'string' ? rawSessionId.trim() : '';
+
+  const rawFrom = Array.isArray((req.query as any).from) ? (req.query as any).from[0] : (req.query as any).from;
+  const rawTo = Array.isArray((req.query as any).to) ? (req.query as any).to[0] : (req.query as any).to;
+  const { from, to } = parseDateRangeShanghai({ from: rawFrom, to: rawTo });
+
+  try {
+    const where: any = { userId: user.id };
+    if (path) where.path = { contains: path, mode: 'insensitive' };
+    if (sessionId) where.sessionId = sessionId;
+    if (from || to) where.createdAt = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+
+    const [total, agg, views] = await Promise.all([
+      prisma.userPageView.count({ where }),
+      prisma.userPageView.aggregate({ where, _sum: { durationSeconds: true } }),
+      prisma.userPageView.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+        skip: offset,
+      }),
+    ]);
+
+    res.json({
+      total,
+      limit,
+      offset,
+      sumDurationSeconds: agg._sum?.durationSeconds || 0,
+      items: views.map((v) => ({
+        id: v.id,
+        sessionId: v.sessionId,
+        path: v.path,
+        referrer: v.referrer,
+        userAgent: v.userAgent,
+        startedAt: v.startedAt,
+        endedAt: v.endedAt,
+        durationSeconds: v.durationSeconds,
+        createdAt: v.createdAt,
+      })),
+    });
+  } catch (error) {
+    console.error('Failed to get pageviews (me)', error);
+    res.status(500).json({ error: 'Failed to get pageviews' });
+  }
+});
+
+// --- Personal Center Export (CSV) ---
+
+app.get('/api/me/export/tasks.csv', requireAuth(), async (req, res) => {
+  const user = (req as any).user;
+
+  const rawLimit = Array.isArray((req.query as any).limit) ? (req.query as any).limit[0] : (req.query as any).limit;
+  const limit = Math.min(5000, Math.max(1, Number.parseInt(String(rawLimit || '2000'), 10) || 2000));
+
+  const rawStatus = Array.isArray((req.query as any).status) ? (req.query as any).status[0] : (req.query as any).status;
+  const status =
+    rawStatus === 'PENDING' || rawStatus === 'RUNNING' || rawStatus === 'COMPLETED' || rawStatus === 'FAILED'
+      ? rawStatus
+      : null;
+
+  const rawSearchType = Array.isArray((req.query as any).searchType) ? (req.query as any).searchType[0] : (req.query as any).searchType;
+  const searchType = rawSearchType === 'quick' || rawSearchType === 'deep' ? rawSearchType : null;
+
+  const rawModelKey = Array.isArray((req.query as any).modelKey) ? (req.query as any).modelKey[0] : (req.query as any).modelKey;
+  const modelKey = typeof rawModelKey === 'string' ? rawModelKey.trim() : '';
+
+  const rawQ = Array.isArray((req.query as any).q) ? (req.query as any).q[0] : (req.query as any).q;
+  const q = typeof rawQ === 'string' ? rawQ.trim() : '';
+
+  const rawFrom = Array.isArray((req.query as any).from) ? (req.query as any).from[0] : (req.query as any).from;
+  const rawTo = Array.isArray((req.query as any).to) ? (req.query as any).to[0] : (req.query as any).to;
+  const { from, to } = parseDateRangeShanghai({ from: rawFrom, to: rawTo });
+
+  try {
+    const where: any = { userId: user.id };
+    if (status) where.status = status;
+    if (searchType) where.searchType = searchType;
+    if (from || to) where.createdAt = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+    if (modelKey) where.modelRuns = { some: { modelKey: { contains: modelKey, mode: 'insensitive' } } };
+    if (q) {
+      where.OR = [
+        { keyword: { contains: q, mode: 'insensitive' } },
+        { modelRuns: { some: { modelKey: { contains: q, mode: 'insensitive' } } } },
+      ];
+    }
+
+    const tasks = await prisma.task.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      select: {
+        id: true,
+        createdAt: true,
+        status: true,
+        progress: true,
+        searchType: true,
+        keyword: true,
+        usageDate: true,
+        costUnits: true,
+        quotaUnits: true,
+        pointsUnits: true,
+        selectedModels: true,
+        logs: true,
+        result: true,
+      },
+    });
+
+    const headers = [
+      'id',
+      'createdAt',
+      'status',
+      'progress',
+      'searchType',
+      'keyword',
+      'usageDate',
+      'costUnits',
+      'quotaUnits',
+      'pointsUnits',
+      'selectedModelsJson',
+      'resultSummary',
+      'analysisSummary',
+      'logs',
+      'resultJson',
+    ];
+
+    const rows = tasks.map((t) => {
+      const result: any = t.result as any;
+      const resultSummary = typeof result?.summary === 'string' ? result.summary : '';
+      const analysisSummary = typeof result?.analysis?.summary === 'string' ? result.analysis.summary : '';
+      const logs = Array.isArray(t.logs) ? t.logs.join('\n') : '';
+      return [
+        t.id,
+        t.createdAt,
+        t.status,
+        t.progress,
+        t.searchType,
+        t.keyword,
+        t.usageDate ?? '',
+        t.costUnits ?? 0,
+        t.quotaUnits ?? 0,
+        t.pointsUnits ?? 0,
+        t.selectedModels,
+        resultSummary,
+        analysisSummary,
+        logs,
+        t.result,
+      ];
+    });
+
+    const csv = toCsv(headers, rows);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="aidso_my_tasks_${Date.now()}.csv"`);
+    res.send(csv);
+  } catch (error) {
+    console.error('Failed to export my tasks csv', error);
+    res.status(500).json({ error: 'Failed to export tasks' });
+  }
+});
+
+app.get('/api/me/export/runs.csv', requireAuth(), async (req, res) => {
+  const user = (req as any).user;
+
+  const rawLimit = Array.isArray((req.query as any).limit) ? (req.query as any).limit[0] : (req.query as any).limit;
+  const limit = Math.min(5000, Math.max(1, Number.parseInt(String(rawLimit || '3000'), 10) || 3000));
+
+  const rawPurpose = Array.isArray((req.query as any).purpose) ? (req.query as any).purpose[0] : (req.query as any).purpose;
+  const purpose = rawPurpose === 'MODEL' || rawPurpose === 'ANALYSIS' ? rawPurpose : null;
+
+  const rawStatus = Array.isArray((req.query as any).status) ? (req.query as any).status[0] : (req.query as any).status;
+  const status =
+    rawStatus === 'PENDING' || rawStatus === 'RUNNING' || rawStatus === 'SUCCEEDED' || rawStatus === 'FAILED'
+      ? rawStatus
+      : null;
+
+  const rawTaskId = Array.isArray((req.query as any).taskId) ? (req.query as any).taskId[0] : (req.query as any).taskId;
+  const taskId = typeof rawTaskId === 'string' ? rawTaskId.trim() : '';
+
+  const rawModelKey = Array.isArray((req.query as any).modelKey) ? (req.query as any).modelKey[0] : (req.query as any).modelKey;
+  const modelKey = typeof rawModelKey === 'string' ? rawModelKey.trim() : '';
+
+  const rawQ = Array.isArray((req.query as any).q) ? (req.query as any).q[0] : (req.query as any).q;
+  const q = typeof rawQ === 'string' ? rawQ.trim() : '';
+
+  const rawFrom = Array.isArray((req.query as any).from) ? (req.query as any).from[0] : (req.query as any).from;
+  const rawTo = Array.isArray((req.query as any).to) ? (req.query as any).to[0] : (req.query as any).to;
+  const { from, to } = parseDateRangeShanghai({ from: rawFrom, to: rawTo });
+
+  try {
+    const where: any = { task: { userId: user.id } };
+    if (purpose) where.purpose = purpose;
+    if (status) where.status = status;
+    if (taskId) where.taskId = taskId;
+    if (modelKey) where.modelKey = { contains: modelKey, mode: 'insensitive' };
+    if (from || to) where.createdAt = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+    if (q) {
+      where.OR = [
+        { task: { keyword: { contains: q, mode: 'insensitive' } } },
+        { modelKey: { contains: q, mode: 'insensitive' } },
+        { provider: { contains: q, mode: 'insensitive' } },
+        { modelName: { contains: q, mode: 'insensitive' } },
+      ];
+    }
+
+    const runs = await prisma.taskModelRun.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      select: {
+        id: true,
+        createdAt: true,
+        purpose: true,
+        status: true,
+        error: true,
+        startedAt: true,
+        completedAt: true,
+        modelKey: true,
+        provider: true,
+        modelName: true,
+        taskId: true,
+        task: { select: { keyword: true, searchType: true } },
+        prompt: true,
+        responseText: true,
+      },
+    });
+
+    const headers = [
+      'id',
+      'createdAt',
+      'purpose',
+      'status',
+      'taskId',
+      'taskKeyword',
+      'taskSearchType',
+      'modelKey',
+      'provider',
+      'modelName',
+      'startedAt',
+      'completedAt',
+      'latencyMs',
+      'error',
+      'prompt',
+      'responseText',
+    ];
+
+    const rows = runs.map((r) => {
+      const latencyMs =
+        r.startedAt && r.completedAt ? Math.max(0, r.completedAt.getTime() - r.startedAt.getTime()) : '';
+      return [
+        r.id,
+        r.createdAt,
+        r.purpose,
+        r.status,
+        r.taskId,
+        r.task.keyword,
+        r.task.searchType,
+        r.modelKey,
+        r.provider ?? '',
+        r.modelName ?? '',
+        r.startedAt ?? '',
+        r.completedAt ?? '',
+        latencyMs,
+        r.error ?? '',
+        r.prompt ?? '',
+        r.responseText ?? '',
+      ];
+    });
+
+    const csv = toCsv(headers, rows);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="aidso_my_runs_${Date.now()}.csv"`);
+    res.send(csv);
+  } catch (error) {
+    console.error('Failed to export my runs csv', error);
+    res.status(500).json({ error: 'Failed to export runs' });
+  }
+});
+
+app.get('/api/me/export/points-logs.csv', requireAuth(), async (req, res) => {
+  const user = (req as any).user;
+
+  const rawLimit = Array.isArray((req.query as any).limit) ? (req.query as any).limit[0] : (req.query as any).limit;
+  const limit = Math.min(5000, Math.max(1, Number.parseInt(String(rawLimit || '3000'), 10) || 3000));
+
+  const rawType = Array.isArray((req.query as any).type) ? (req.query as any).type[0] : (req.query as any).type;
+  const type =
+    rawType === 'RECHARGE' ||
+    rawType === 'CONSUME' ||
+    rawType === 'ADMIN_ADD' ||
+    rawType === 'ADMIN_SUB' ||
+    rawType === 'REFUND'
+      ? rawType
+      : null;
+
+  const rawQ = Array.isArray((req.query as any).q) ? (req.query as any).q[0] : (req.query as any).q;
+  const q = typeof rawQ === 'string' ? rawQ.trim() : '';
+
+  const rawFrom = Array.isArray((req.query as any).from) ? (req.query as any).from[0] : (req.query as any).from;
+  const rawTo = Array.isArray((req.query as any).to) ? (req.query as any).to[0] : (req.query as any).to;
+  const { from, to } = parseDateRangeShanghai({ from: rawFrom, to: rawTo });
+
+  try {
+    const where: any = { userId: user.id };
+    if (type) where.type = type;
+    if (from || to) where.createdAt = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+    if (q) {
+      where.OR = [
+        { description: { contains: q, mode: 'insensitive' } },
+        { type: { equals: q } },
+      ];
+    }
+
+    const logs = await prisma.pointsLog.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+    });
+
+    const headers = ['id', 'createdAt', 'type', 'amount', 'balance', 'description', 'operatorId'];
+    const rows = logs.map((l) => [
+      l.id,
+      l.createdAt,
+      l.type,
+      l.amount,
+      l.balance,
+      l.description ?? '',
+      l.operatorId ?? '',
+    ]);
+
+    const csv = toCsv(headers, rows);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="aidso_my_points_logs_${Date.now()}.csv"`);
+    res.send(csv);
+  } catch (error) {
+    console.error('Failed to export my points logs csv', error);
+    res.status(500).json({ error: 'Failed to export points logs' });
+  }
+});
+
+app.get('/api/me/export/pageviews.csv', requireAuth(), async (req, res) => {
+  const user = (req as any).user;
+
+  const rawLimit = Array.isArray((req.query as any).limit) ? (req.query as any).limit[0] : (req.query as any).limit;
+  const limit = Math.min(5000, Math.max(1, Number.parseInt(String(rawLimit || '3000'), 10) || 3000));
+
+  const rawPath = Array.isArray((req.query as any).path) ? (req.query as any).path[0] : (req.query as any).path;
+  const path = typeof rawPath === 'string' ? rawPath.trim() : '';
+
+  const rawSessionId = Array.isArray((req.query as any).sessionId) ? (req.query as any).sessionId[0] : (req.query as any).sessionId;
+  const sessionId = typeof rawSessionId === 'string' ? rawSessionId.trim() : '';
+
+  const rawFrom = Array.isArray((req.query as any).from) ? (req.query as any).from[0] : (req.query as any).from;
+  const rawTo = Array.isArray((req.query as any).to) ? (req.query as any).to[0] : (req.query as any).to;
+  const { from, to } = parseDateRangeShanghai({ from: rawFrom, to: rawTo });
+
+  try {
+    const where: any = { userId: user.id };
+    if (path) where.path = { contains: path, mode: 'insensitive' };
+    if (sessionId) where.sessionId = sessionId;
+    if (from || to) where.createdAt = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+
+    const views = await prisma.userPageView.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+    });
+
+    const headers = [
+      'id',
+      'createdAt',
+      'sessionId',
+      'path',
+      'startedAt',
+      'endedAt',
+      'durationSeconds',
+      'referrer',
+      'userAgent',
+    ];
+
+    const rows = views.map((v) => [
+      v.id,
+      v.createdAt,
+      v.sessionId,
+      v.path,
+      v.startedAt,
+      v.endedAt ?? '',
+      v.durationSeconds ?? '',
+      v.referrer ?? '',
+      v.userAgent ?? '',
+    ]);
+
+    const csv = toCsv(headers, rows);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="aidso_my_pageviews_${Date.now()}.csv"`);
+    res.send(csv);
+  } catch (error) {
+    console.error('Failed to export my pageviews csv', error);
+    res.status(500).json({ error: 'Failed to export pageviews' });
   }
 });
 
@@ -391,6 +1436,59 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ success: true });
 });
 
+// --- Tracking Routes ---
+
+app.post('/api/track/pageview', requireAuth(), async (req, res) => {
+  const user = (req as any).user;
+  const body = req.body || {};
+  const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
+  const pagePath = typeof body.path === 'string' ? body.path : '';
+  const referrer = typeof body.referrer === 'string' ? body.referrer : req.get('referer') || null;
+  const userAgent = typeof body.userAgent === 'string' ? body.userAgent : req.get('user-agent') || null;
+
+  if (!sessionId || sessionId.length > 200) return res.status(400).json({ error: 'Invalid sessionId' });
+  if (!pagePath || pagePath.length > 2048) return res.status(400).json({ error: 'Invalid path' });
+
+  const startedAtRaw = body.startedAt;
+  const endedAtRaw = body.endedAt;
+  const durationSecondsRaw = body.durationSeconds;
+
+  const startedAt = typeof startedAtRaw === 'string' ? new Date(startedAtRaw) : null;
+  const endedAt = typeof endedAtRaw === 'string' ? new Date(endedAtRaw) : null;
+  const startedAtValid = startedAt && !Number.isNaN(startedAt.getTime()) ? startedAt : null;
+  const endedAtValid = endedAt && !Number.isNaN(endedAt.getTime()) ? endedAt : null;
+
+  const durationSecondsParsed = Number.isFinite(Number(durationSecondsRaw)) ? Number(durationSecondsRaw) : null;
+  const durationSeconds =
+    typeof durationSecondsParsed === 'number' && durationSecondsParsed >= 0
+      ? Math.min(60 * 60 * 24, Math.round(durationSecondsParsed))
+      : startedAtValid && endedAtValid
+        ? Math.max(0, Math.min(60 * 60 * 24, Math.round((endedAtValid.getTime() - startedAtValid.getTime()) / 1000)))
+        : null;
+
+  try {
+    const now = new Date();
+    await prisma.userPageView.create({
+      data: {
+        id: crypto.randomUUID(),
+        userId: user.id,
+        sessionId,
+        path: pagePath,
+        referrer,
+        userAgent,
+        startedAt: startedAtValid || now,
+        endedAt: endedAtValid,
+        durationSeconds,
+        createdAt: now,
+      },
+    });
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Failed to track pageview', error);
+    res.status(500).json({ error: 'Failed to track pageview' });
+  }
+});
+
 // Backward compatible (legacy)
 app.post('/api/login', async (req, res) => {
   const { email, password } = req.body || {};
@@ -435,131 +1533,18 @@ app.get('/api/tasks', requireAuth(), async (req, res) => {
 // 2. Create Task (改为按点数扣费)
 app.post('/api/tasks', requireAuth(), async (req, res) => {
   const user = (req as any).user;
-  const { keyword, searchType, models } = req.body || {};
-  
-  if (!keyword || typeof keyword !== 'string') {
-    return res.status(400).json({ error: 'Keyword is required' });
-  }
-  const normalizedSearchType = searchType === 'deep' ? 'deep' : 'quick';
-  const selectedModels = Array.isArray(models) ? models.filter((m: any) => typeof m === 'string') : [];
-  if (selectedModels.length === 0) {
-    return res.status(400).json({ error: 'At least one model is required' });
-  }
-
   try {
-    const config = readAppConfig();
-    const usageDate = getShanghaiUsageDate();
-
-    const hasUsableProvider = selectedModels.some((modelKey) => {
-      const picked = pickNewApiConfigForModel(config, modelKey);
-      const cfg = (picked as any)?.cfg;
-      return (
-        typeof cfg?.baseUrl === 'string' &&
-        cfg.baseUrl.trim() &&
-        typeof cfg?.apiKey === 'string' &&
-        cfg.apiKey.trim()
-      );
-    });
-
-    if (!hasUsableProvider) {
-      const platformData: Record<string, any> = Object.fromEntries(
-        selectedModels.map((k) => [
-          k,
-          {
-            engine: 'unconfigured',
-            thinking: '',
-            response: '⚠️ NewAPI 未配置（baseUrl/apiKey 为空），任务未执行。\n\n请管理员先到 /admin 配置 NewAPI。',
-            sources: [],
-          },
-        ])
-      );
-
-      const task = await prisma.task.create({
-        data: {
-          keyword,
-          status: 'FAILED',
-          progress: 100,
-          logs: [
-            '🚀 任务已创建',
-            '⚠️ NewAPI 未配置：请先在后台填写 baseUrl / apiKey 并启用模型源（/admin → 权限与配置 → 多模型接口配置）',
-          ],
-          searchType: normalizedSearchType,
-          selectedModels,
-          costUnits: 0,
-          usageDate,
-          userId: user.id,
-          result: {
-            summary: 'NewAPI 未配置，任务未执行',
-            analysis: { summary: 'NewAPI 未配置（baseUrl/apiKey 为空），无法调用模型。' },
-            platformData,
-          } as any,
-        },
-      });
-
-      return res.json(task);
-    }
-
-    // 改为点数扣费：每次任务消耗 1 点
-    const costPoints = 1;
-    
-    // 检查用户点数是否足够
-    const currentUser = await prisma.user.findUnique({ where: { id: user.id } });
-    if (!currentUser || currentUser.points < costPoints) {
-      return res.status(403).json({
-        error: '点数不足',
-        message: `执行此任务需要 ${costPoints} 点，您当前余额为 ${currentUser?.points || 0} 点`,
-        requiredPoints: costPoints,
-        currentPoints: currentUser?.points || 0
-      });
-    }
-
-    // 使用事务：扣点 + 创建任务
-    const result = await prisma.$transaction(async (tx) => {
-      // 扣除点数
-      const updatedUser = await tx.user.update({
-        where: { id: user.id },
-        data: { points: { decrement: costPoints } }
-      });
-
-      // 记录点数消费日志
-      await tx.pointsLog.create({
-        data: {
-          userId: user.id,
-          amount: -costPoints,
-          balance: updatedUser.points,
-          type: 'CONSUME',
-          description: `执行任务: ${keyword.substring(0, 50)}`
-        }
-      });
-
-      // 创建任务
-      const task = await tx.task.create({
-        data: {
-          keyword,
-          status: 'PENDING',
-          logs: [
-            '🚀 任务已创建，准备启动调研...',
-            `💰 已扣除 ${costPoints} 点，当前余额：${updatedUser.points} 点`
-          ],
-          searchType: normalizedSearchType,
-          selectedModels,
-          costUnits: costPoints,
-          usageDate,
-          userId: user.id,
-        }
-      });
-
-      return { task, remainingPoints: updatedUser.points };
-    });
-    
-    // Trigger background processing (simulate async)
-    simulateTaskProcessing(result.task.id, keyword, selectedModels, normalizedSearchType);
-    
+    const { keyword, searchType, models } = req.body || {};
+    const result = await createTaskForUser({ user, keyword, searchType, models });
     res.json({
       ...result.task,
-      remainingPoints: result.remainingPoints
+      remainingPoints: result.remainingPoints,
     });
   } catch (error) {
+    const err: any = error;
+    if (err?.status && err?.payload) {
+      return res.status(err.status).json(err.payload);
+    }
     console.error('Error creating task:', error);
     res.status(500).json({ error: 'Failed to create task' });
   }
@@ -575,7 +1560,8 @@ app.get('/api/tasks/:id', requireAuth(), async (req, res) => {
     const task = await prisma.task.findUnique({
       where: { id }
     });
-    if (!task || task.userId !== user.id) return res.status(404).json({ error: 'Task not found' });
+    const isAdmin = user?.role === 'ADMIN';
+    if (!task || (!isAdmin && task.userId !== user.id)) return res.status(404).json({ error: 'Task not found' });
     res.json(task);
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch task' });
@@ -591,7 +1577,8 @@ app.get('/api/tasks/:id/runs', requireAuth(), async (req, res) => {
 
   try {
     const task = await prisma.task.findUnique({ where: { id } });
-    if (!task || task.userId !== user.id) return res.status(404).json({ error: 'Task not found' });
+    const isAdmin = user?.role === 'ADMIN';
+    if (!task || (!isAdmin && task.userId !== user.id)) return res.status(404).json({ error: 'Task not found' });
 
     const runs = await prisma.taskModelRun.findMany({
       where: { taskId: id },
@@ -659,32 +1646,103 @@ app.get('/api/admin/stats', requireAdmin(), async (req, res) => {
 
 // 5. Get Users List
 app.get('/api/admin/users', requireAdmin(), async (req, res) => {
-    try {
-        const users = await prisma.user.findMany({
-            include: { membership: true },
-            orderBy: { createdAt: 'desc' }
-        });
-        
-        // Transform to match frontend format
-        const formattedUsers = users.map(u => ({
-            id: u.id,
-            name: u.name || 'Unknown User',
-            email: u.email,
-            planKey: u.membership?.plan || 'FREE',
-            plan: planLabel(u.membership?.plan || 'FREE'),
-            points: u.points || 0,
-            status: '活跃', // Default active
-            joined: u.createdAt.toISOString().split('T')[0],
-            spent: '¥0', // Placeholder
-            apiCalls: 0, // Placeholder
-            tokenUsage: '0', // Placeholder
-            key: 'sk-live-...' + u.id // Placeholder
-        }));
-        
-        res.json(formattedUsers);
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to fetch users' });
+  const rawLimit = Array.isArray((req.query as any).limit) ? (req.query as any).limit[0] : (req.query as any).limit;
+  const limit = Math.min(200, Math.max(1, Number.parseInt(String(rawLimit || '50'), 10) || 50));
+  const rawOffset = Array.isArray((req.query as any).offset) ? (req.query as any).offset[0] : (req.query as any).offset;
+  const offset = Math.max(0, Number.parseInt(String(rawOffset || '0'), 10) || 0);
+
+  const rawPlan = Array.isArray((req.query as any).plan) ? (req.query as any).plan[0] : (req.query as any).plan;
+  const plan = rawPlan === 'FREE' || rawPlan === 'PRO' || rawPlan === 'ENTERPRISE' ? rawPlan : null;
+
+  const rawQ = Array.isArray((req.query as any).q) ? (req.query as any).q[0] : (req.query as any).q;
+  const q = typeof rawQ === 'string' ? rawQ.trim() : '';
+
+  const rawFrom = Array.isArray((req.query as any).from) ? (req.query as any).from[0] : (req.query as any).from;
+  const rawTo = Array.isArray((req.query as any).to) ? (req.query as any).to[0] : (req.query as any).to;
+  const { from, to } = parseDateRangeShanghai({ from: rawFrom, to: rawTo });
+
+  try {
+    const and: any[] = [];
+    if (q) {
+      and.push({
+        OR: [
+          { email: { contains: q, mode: 'insensitive' } },
+          { name: { contains: q, mode: 'insensitive' } },
+        ],
+      });
     }
+
+    if (plan) {
+      if (plan === 'FREE') {
+        and.push({
+          OR: [{ membership: { is: null } }, { membership: { is: { plan: 'FREE' } } }],
+        });
+      } else {
+        and.push({ membership: { is: { plan } } });
+      }
+    }
+
+    if (from || to) {
+      and.push({ createdAt: { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) } });
+    }
+
+    const where: any = and.length ? { AND: and } : {};
+
+    const [total, users] = await Promise.all([
+      prisma.user.count({ where }),
+      prisma.user.findMany({
+        where,
+        include: { membership: true },
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+        skip: offset,
+      }),
+    ]);
+
+    const userIds = users.map((u) => u.id);
+	    const taskAgg =
+	      userIds.length > 0
+	        ? await prisma.task.groupBy({
+	            by: ['userId'],
+	            where: { userId: { in: userIds } },
+	            _count: { id: true },
+	            _sum: { pointsUnits: true },
+	          })
+	        : [];
+
+	    const taskAggByUserId = new Map<number, { tasks: number; pointsUnits: number }>();
+	    for (const row of taskAgg as any[]) {
+	      const uid = row.userId as number;
+	      taskAggByUserId.set(uid, {
+	        tasks: Number(row._count?.id || 0),
+	        pointsUnits: Number(row._sum?.pointsUnits || 0),
+	      });
+	    }
+
+    const items = users.map((u) => {
+      const agg = taskAggByUserId.get(u.id) || { tasks: 0, pointsUnits: 0 };
+      const planKey = u.membership?.plan || 'FREE';
+      return {
+        id: u.id,
+        name: u.name || 'Unknown User',
+        email: u.email,
+        planKey,
+        plan: planLabel(planKey),
+        points: u.points || 0,
+        status: '活跃',
+        joined: u.createdAt.toISOString().split('T')[0],
+        spent: `${agg.pointsUnits} 点`,
+        apiCalls: agg.tasks,
+        tokenUsage: '0',
+        key: 'sk-live-...' + u.id,
+      };
+    });
+
+    res.json({ total, limit, offset, items });
+  } catch (error) {
+    console.error('Failed to fetch users (admin)', error);
+    res.status(500).json({ error: 'Failed to fetch users' });
+  }
 });
 
 // 6. Create User
@@ -868,6 +1926,1482 @@ app.post('/api/admin/users/:id/recharge', requireAdmin(), async (req, res) => {
         console.error('Recharge failed', error);
         res.status(500).json({ error: 'Failed to recharge points' });
     }
+});
+
+// 7.2 用户分析与行为数据（管理员）
+app.get('/api/admin/users/:id/analytics', requireAdmin(), async (req, res) => {
+  const rawId = (req.params as any).id as string | string[] | undefined;
+  const id = Array.isArray(rawId) ? rawId[0] : rawId;
+  const userId = Number.parseInt(id || '', 10);
+  if (!Number.isFinite(userId)) return res.status(400).json({ error: 'Invalid user id' });
+
+  try {
+    const targetUser = await prisma.user.findUnique({
+      where: { id: userId },
+      include: { membership: true },
+    });
+    if (!targetUser) return res.status(404).json({ error: 'User not found' });
+
+    const [
+      taskCount,
+      runCount,
+      modelRunCount,
+      analysisRunCount,
+      pointsLogCount,
+      pageViewCount,
+      taskAgg,
+      pointsAggConsume,
+      pointsAggAdd,
+      pageViewAgg,
+      lastTask,
+      lastPageView,
+    ] = await Promise.all([
+      prisma.task.count({ where: { userId } }),
+      prisma.taskModelRun.count({ where: { task: { userId } } }),
+      prisma.taskModelRun.count({ where: { task: { userId }, purpose: 'MODEL' } }),
+      prisma.taskModelRun.count({ where: { task: { userId }, purpose: 'ANALYSIS' } }),
+      prisma.pointsLog.count({ where: { userId } }),
+      prisma.userPageView.count({ where: { userId } }),
+      prisma.task.aggregate({
+        where: { userId },
+        _sum: { costUnits: true, quotaUnits: true, pointsUnits: true },
+      }),
+      prisma.pointsLog.aggregate({
+        where: { userId, amount: { lt: 0 } },
+        _sum: { amount: true },
+      }),
+      prisma.pointsLog.aggregate({
+        where: { userId, amount: { gt: 0 } },
+        _sum: { amount: true },
+      }),
+      prisma.userPageView.aggregate({
+        where: { userId },
+        _sum: { durationSeconds: true },
+      }),
+      prisma.task.findFirst({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+        select: { createdAt: true },
+      }),
+      prisma.userPageView.findFirst({
+        where: { userId },
+        orderBy: { startedAt: 'desc' },
+        select: { startedAt: true, endedAt: true },
+      }),
+    ]);
+
+    const config = readAppConfig();
+    const billing = getBillingConfig(config);
+    const usageDate = getShanghaiUsageDate();
+    const plan = targetUser.membership?.plan || 'FREE';
+    const dailyLimit = billing.dailyUnitsByPlan?.[plan] ?? billing.dailyUnitsByPlan.FREE;
+
+    const todayAgg = await prisma.task.aggregate({
+      where: { userId, usageDate },
+      _sum: { costUnits: true, quotaUnits: true, pointsUnits: true },
+    });
+
+    const usedQuotaUnitsToday = todayAgg._sum?.quotaUnits || 0;
+    const remainingQuotaUnitsToday = Math.max(0, dailyLimit - usedQuotaUnitsToday);
+
+    const lastActiveAt = (() => {
+      const t = lastTask?.createdAt?.getTime() || 0;
+      const p = lastPageView?.endedAt?.getTime() || lastPageView?.startedAt?.getTime() || 0;
+      const last = Math.max(t, p);
+      return last ? new Date(last).toISOString() : null;
+    })();
+
+    res.json({
+      user: {
+        ...sanitizeUser(targetUser),
+        createdAt: targetUser.createdAt,
+        updatedAt: targetUser.updatedAt,
+      },
+      counts: {
+        tasks: taskCount,
+        runs: runCount,
+        modelRuns: modelRunCount,
+        analysisRuns: analysisRunCount,
+        pointsLogs: pointsLogCount,
+        pageViews: pageViewCount,
+      },
+      totals: {
+        costUnits: taskAgg._sum?.costUnits || 0,
+        quotaUnits: taskAgg._sum?.quotaUnits || 0,
+        pointsUnits: taskAgg._sum?.pointsUnits || 0,
+        pointsConsumed: Math.abs(pointsAggConsume._sum?.amount || 0),
+        pointsAdded: pointsAggAdd._sum?.amount || 0,
+        browsingDurationSeconds: pageViewAgg._sum?.durationSeconds || 0,
+      },
+      today: {
+        usageDate,
+        plan,
+        dailyLimit,
+        usedQuotaUnits: usedQuotaUnitsToday,
+        remainingQuotaUnits: remainingQuotaUnitsToday,
+        costUnits: todayAgg._sum?.costUnits || 0,
+        pointsUnits: todayAgg._sum?.pointsUnits || 0,
+      },
+      lastActiveAt,
+    });
+  } catch (error) {
+    console.error('Failed to get user analytics', error);
+    res.status(500).json({ error: 'Failed to get user analytics' });
+  }
+});
+
+app.get('/api/admin/users/:id/tasks', requireAdmin(), async (req, res) => {
+  const rawId = (req.params as any).id as string | string[] | undefined;
+  const id = Array.isArray(rawId) ? rawId[0] : rawId;
+  const userId = Number.parseInt(id || '', 10);
+  if (!Number.isFinite(userId)) return res.status(400).json({ error: 'Invalid user id' });
+
+  const rawLimit = Array.isArray((req.query as any).limit) ? (req.query as any).limit[0] : (req.query as any).limit;
+  const limit = Math.min(200, Math.max(1, Number.parseInt(String(rawLimit || '50'), 10) || 50));
+
+  try {
+    const tasks = await prisma.task.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      select: {
+        id: true,
+        keyword: true,
+        status: true,
+        progress: true,
+        searchType: true,
+        selectedModels: true,
+        costUnits: true,
+        quotaUnits: true,
+        pointsUnits: true,
+        usageDate: true,
+        createdAt: true,
+        result: true,
+        _count: { select: { modelRuns: true } },
+      },
+    });
+
+    res.json(
+      tasks.map((t) => {
+        const result: any = t.result as any;
+        const resultSummary = typeof result?.summary === 'string' ? result.summary : null;
+        const analysisSummary = typeof result?.analysis?.summary === 'string' ? result.analysis.summary : null;
+        return {
+          id: t.id,
+          keyword: t.keyword,
+          status: t.status,
+          progress: t.progress,
+          searchType: t.searchType,
+          selectedModels: t.selectedModels,
+          costUnits: t.costUnits,
+          quotaUnits: t.quotaUnits,
+          pointsUnits: t.pointsUnits,
+          usageDate: t.usageDate,
+          createdAt: t.createdAt,
+          modelRunsCount: t._count.modelRuns,
+          resultSummary,
+          analysisSummary,
+        };
+      })
+    );
+  } catch (error) {
+    console.error('Failed to get user tasks', error);
+    res.status(500).json({ error: 'Failed to get user tasks' });
+  }
+});
+
+app.get('/api/admin/users/:id/runs', requireAdmin(), async (req, res) => {
+  const rawId = (req.params as any).id as string | string[] | undefined;
+  const id = Array.isArray(rawId) ? rawId[0] : rawId;
+  const userId = Number.parseInt(id || '', 10);
+  if (!Number.isFinite(userId)) return res.status(400).json({ error: 'Invalid user id' });
+
+  const rawLimit = Array.isArray((req.query as any).limit) ? (req.query as any).limit[0] : (req.query as any).limit;
+  const limit = Math.min(200, Math.max(1, Number.parseInt(String(rawLimit || '50'), 10) || 50));
+
+  try {
+    const runs = await prisma.taskModelRun.findMany({
+      where: { task: { userId } },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      select: {
+        id: true,
+        taskId: true,
+        task: { select: { keyword: true, searchType: true, createdAt: true } },
+        modelKey: true,
+        provider: true,
+        modelName: true,
+        purpose: true,
+        status: true,
+        error: true,
+        startedAt: true,
+        completedAt: true,
+        createdAt: true,
+        responseText: true,
+      },
+    });
+
+    res.json(
+      runs.map((r) => {
+        const latencyMs =
+          r.startedAt && r.completedAt ? Math.max(0, r.completedAt.getTime() - r.startedAt.getTime()) : null;
+        const responsePreview =
+          typeof r.responseText === 'string' ? r.responseText.slice(0, 1200) : null;
+        return {
+          id: r.id,
+          taskId: r.taskId,
+          taskKeyword: r.task.keyword,
+          taskSearchType: r.task.searchType,
+          modelKey: r.modelKey,
+          provider: r.provider,
+          modelName: r.modelName,
+          purpose: r.purpose,
+          status: r.status,
+          error: r.error,
+          startedAt: r.startedAt,
+          completedAt: r.completedAt,
+          createdAt: r.createdAt,
+          latencyMs,
+          responsePreview,
+        };
+      })
+    );
+  } catch (error) {
+    console.error('Failed to get user runs', error);
+    res.status(500).json({ error: 'Failed to get user runs' });
+  }
+});
+
+app.get('/api/admin/users/:id/points-logs', requireAdmin(), async (req, res) => {
+  const rawId = (req.params as any).id as string | string[] | undefined;
+  const id = Array.isArray(rawId) ? rawId[0] : rawId;
+  const userId = Number.parseInt(id || '', 10);
+  if (!Number.isFinite(userId)) return res.status(400).json({ error: 'Invalid user id' });
+
+  const rawLimit = Array.isArray((req.query as any).limit) ? (req.query as any).limit[0] : (req.query as any).limit;
+  const limit = Math.min(200, Math.max(1, Number.parseInt(String(rawLimit || '100'), 10) || 100));
+
+  try {
+    const logs = await prisma.pointsLog.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+    });
+    res.json(
+      logs.map((l) => ({
+        id: l.id,
+        amount: l.amount,
+        balance: l.balance,
+        type: l.type,
+        description: l.description,
+        operatorId: l.operatorId,
+        createdAt: l.createdAt,
+      }))
+    );
+  } catch (error) {
+    console.error('Failed to get points logs', error);
+    res.status(500).json({ error: 'Failed to get points logs' });
+  }
+});
+
+app.get('/api/admin/users/:id/pageviews', requireAdmin(), async (req, res) => {
+  const rawId = (req.params as any).id as string | string[] | undefined;
+  const id = Array.isArray(rawId) ? rawId[0] : rawId;
+  const userId = Number.parseInt(id || '', 10);
+  if (!Number.isFinite(userId)) return res.status(400).json({ error: 'Invalid user id' });
+
+  const rawLimit = Array.isArray((req.query as any).limit) ? (req.query as any).limit[0] : (req.query as any).limit;
+  const limit = Math.min(500, Math.max(1, Number.parseInt(String(rawLimit || '200'), 10) || 200));
+
+  try {
+    const views = await prisma.userPageView.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      select: {
+        id: true,
+        sessionId: true,
+        path: true,
+        referrer: true,
+        userAgent: true,
+        startedAt: true,
+        endedAt: true,
+        durationSeconds: true,
+        createdAt: true,
+      },
+    });
+    res.json(views);
+  } catch (error) {
+    console.error('Failed to get pageviews', error);
+    res.status(500).json({ error: 'Failed to get pageviews' });
+  }
+});
+
+// 7.3 查询任务/调用明细（管理员）
+app.get('/api/admin/tasks/:id', requireAdmin(), async (req, res) => {
+  const rawId = (req.params as any).id as string | string[] | undefined;
+  const id = Array.isArray(rawId) ? rawId[0] : rawId;
+  if (!id) return res.status(400).json({ error: 'Invalid task id' });
+
+  try {
+    const task = await prisma.task.findUnique({
+      where: { id },
+      include: { user: { include: { membership: true } } },
+    });
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+
+    res.json({
+      ...task,
+      user: task.user ? sanitizeUser(task.user) : null,
+    });
+  } catch (error) {
+    console.error('Failed to get task (admin)', error);
+    res.status(500).json({ error: 'Failed to get task' });
+  }
+});
+
+// 7.3.1 全站任务记录（管理员）
+app.get('/api/admin/tasks', requireAdmin(), async (req, res) => {
+  const rawLimit = Array.isArray((req.query as any).limit) ? (req.query as any).limit[0] : (req.query as any).limit;
+  const limit = Math.min(200, Math.max(1, Number.parseInt(String(rawLimit || '100'), 10) || 100));
+
+  const rawOffset = Array.isArray((req.query as any).offset) ? (req.query as any).offset[0] : (req.query as any).offset;
+  const offset = Math.min(50000, Math.max(0, Number.parseInt(String(rawOffset || '0'), 10) || 0));
+
+  const rawStatus = Array.isArray((req.query as any).status) ? (req.query as any).status[0] : (req.query as any).status;
+  const status =
+    rawStatus === 'PENDING' || rawStatus === 'RUNNING' || rawStatus === 'COMPLETED' || rawStatus === 'FAILED'
+      ? rawStatus
+      : null;
+
+  const rawSearchType = Array.isArray((req.query as any).searchType) ? (req.query as any).searchType[0] : (req.query as any).searchType;
+  const searchType = rawSearchType === 'quick' || rawSearchType === 'deep' ? rawSearchType : null;
+
+  const rawUserId = Array.isArray((req.query as any).userId) ? (req.query as any).userId[0] : (req.query as any).userId;
+  const userId = Number.parseInt(String(rawUserId || ''), 10);
+  const userIdFilter = Number.isFinite(userId) ? userId : null;
+
+  const rawEmail = Array.isArray((req.query as any).email) ? (req.query as any).email[0] : (req.query as any).email;
+  const email = typeof rawEmail === 'string' ? rawEmail.trim() : '';
+
+  const rawModelKey = Array.isArray((req.query as any).modelKey) ? (req.query as any).modelKey[0] : (req.query as any).modelKey;
+  const modelKey = typeof rawModelKey === 'string' ? rawModelKey.trim() : '';
+
+  const rawQ = Array.isArray((req.query as any).q) ? (req.query as any).q[0] : (req.query as any).q;
+  const q = typeof rawQ === 'string' ? rawQ.trim() : '';
+  const rawFrom = Array.isArray((req.query as any).from) ? (req.query as any).from[0] : (req.query as any).from;
+  const rawTo = Array.isArray((req.query as any).to) ? (req.query as any).to[0] : (req.query as any).to;
+  const { from, to } = parseDateRangeShanghai({ from: rawFrom, to: rawTo });
+
+  try {
+    const where: any = {};
+    if (status) where.status = status;
+    if (searchType) where.searchType = searchType;
+    if (userIdFilter) where.userId = userIdFilter;
+    if (email) where.user = { email: { contains: email, mode: 'insensitive' } };
+    if (from || to) where.createdAt = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+    if (modelKey) where.modelRuns = { some: { modelKey: { contains: modelKey, mode: 'insensitive' } } };
+
+    if (q) {
+      where.OR = [
+        { keyword: { contains: q, mode: 'insensitive' } },
+        { user: { email: { contains: q, mode: 'insensitive' } } },
+        { user: { name: { contains: q, mode: 'insensitive' } } },
+        { modelRuns: { some: { modelKey: { contains: q, mode: 'insensitive' } } } },
+      ];
+    }
+
+    const [total, tasks] = await Promise.all([
+      prisma.task.count({ where }),
+      prisma.task.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+        skip: offset,
+        select: {
+          id: true,
+          keyword: true,
+          status: true,
+          progress: true,
+          searchType: true,
+          selectedModels: true,
+          costUnits: true,
+          quotaUnits: true,
+          pointsUnits: true,
+          usageDate: true,
+          createdAt: true,
+          result: true,
+          logs: true,
+          user: { select: { id: true, email: true, name: true } },
+          _count: { select: { modelRuns: true } },
+        },
+      }),
+    ]);
+
+    const items = tasks.map((t) => {
+      const result: any = (t as any).result;
+      const resultSummary = typeof result?.summary === 'string' ? result.summary : null;
+      const analysisSummary = typeof result?.analysis?.summary === 'string' ? result.analysis.summary : null;
+      return {
+        id: t.id,
+        keyword: t.keyword,
+        status: t.status,
+        progress: t.progress,
+        searchType: t.searchType,
+        selectedModels: t.selectedModels,
+        costUnits: t.costUnits,
+        quotaUnits: t.quotaUnits,
+        pointsUnits: t.pointsUnits,
+        usageDate: t.usageDate,
+        createdAt: t.createdAt,
+        user: t.user ? { id: t.user.id, email: t.user.email, name: t.user.name } : null,
+        modelRunsCount: t._count.modelRuns,
+        resultSummary,
+        analysisSummary,
+      };
+    });
+
+    res.json({ total, limit, offset, items });
+  } catch (error) {
+    console.error('Failed to get tasks (admin)', error);
+    res.status(500).json({ error: 'Failed to get tasks' });
+  }
+});
+
+app.get('/api/admin/runs/:id', requireAdmin(), async (req, res) => {
+  const rawId = (req.params as any).id as string | string[] | undefined;
+  const id = Array.isArray(rawId) ? rawId[0] : rawId;
+  if (!id) return res.status(400).json({ error: 'Invalid run id' });
+
+  try {
+    const run = await prisma.taskModelRun.findUnique({
+      where: { id },
+      include: { task: { select: { id: true, keyword: true, userId: true } } },
+    });
+    if (!run) return res.status(404).json({ error: 'Run not found' });
+    res.json(run);
+  } catch (error) {
+    console.error('Failed to get run (admin)', error);
+    res.status(500).json({ error: 'Failed to get run' });
+  }
+});
+
+// 7.4 全站调用记录（管理员）
+app.get('/api/admin/runs', requireAdmin(), async (req, res) => {
+  const rawLimit = Array.isArray((req.query as any).limit) ? (req.query as any).limit[0] : (req.query as any).limit;
+  const limit = Math.min(500, Math.max(1, Number.parseInt(String(rawLimit || '200'), 10) || 200));
+
+  const rawOffset = Array.isArray((req.query as any).offset) ? (req.query as any).offset[0] : (req.query as any).offset;
+  const offset = Math.min(50000, Math.max(0, Number.parseInt(String(rawOffset || '0'), 10) || 0));
+
+  const rawPurpose = Array.isArray((req.query as any).purpose) ? (req.query as any).purpose[0] : (req.query as any).purpose;
+  const purpose = rawPurpose === 'MODEL' || rawPurpose === 'ANALYSIS' ? rawPurpose : null;
+
+  const rawStatus = Array.isArray((req.query as any).status) ? (req.query as any).status[0] : (req.query as any).status;
+  const status =
+    rawStatus === 'PENDING' || rawStatus === 'RUNNING' || rawStatus === 'SUCCEEDED' || rawStatus === 'FAILED'
+      ? rawStatus
+      : null;
+
+  const rawTaskId = Array.isArray((req.query as any).taskId) ? (req.query as any).taskId[0] : (req.query as any).taskId;
+  const taskId = typeof rawTaskId === 'string' ? rawTaskId.trim() : '';
+
+  const rawModelKey = Array.isArray((req.query as any).modelKey) ? (req.query as any).modelKey[0] : (req.query as any).modelKey;
+  const modelKey = typeof rawModelKey === 'string' ? rawModelKey.trim() : '';
+
+  const rawUserId = Array.isArray((req.query as any).userId) ? (req.query as any).userId[0] : (req.query as any).userId;
+  const userId = Number.parseInt(String(rawUserId || ''), 10);
+  const userIdFilter = Number.isFinite(userId) ? userId : null;
+
+  const rawEmail = Array.isArray((req.query as any).email) ? (req.query as any).email[0] : (req.query as any).email;
+  const email = typeof rawEmail === 'string' ? rawEmail.trim() : '';
+
+  const rawQ = Array.isArray((req.query as any).q) ? (req.query as any).q[0] : (req.query as any).q;
+  const q = typeof rawQ === 'string' ? rawQ.trim() : '';
+
+  const rawFrom = Array.isArray((req.query as any).from) ? (req.query as any).from[0] : (req.query as any).from;
+  const rawTo = Array.isArray((req.query as any).to) ? (req.query as any).to[0] : (req.query as any).to;
+  const { from, to } = parseDateRangeShanghai({ from: rawFrom, to: rawTo });
+
+  try {
+    const where: any = {};
+    if (purpose) where.purpose = purpose;
+    if (status) where.status = status;
+    if (taskId) where.taskId = taskId;
+    if (modelKey) where.modelKey = { contains: modelKey, mode: 'insensitive' };
+    if (from || to) where.createdAt = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+
+    if (userIdFilter) where.task = { ...(where.task || {}), userId: userIdFilter };
+    if (email) where.task = { ...(where.task || {}), user: { email: { contains: email, mode: 'insensitive' } } };
+
+    if (q) {
+      where.OR = [
+        { taskId: { contains: q, mode: 'insensitive' } },
+        { modelKey: { contains: q, mode: 'insensitive' } },
+        { provider: { contains: q, mode: 'insensitive' } },
+        { modelName: { contains: q, mode: 'insensitive' } },
+        { task: { keyword: { contains: q, mode: 'insensitive' } } },
+        { task: { user: { email: { contains: q, mode: 'insensitive' } } } },
+        { task: { user: { name: { contains: q, mode: 'insensitive' } } } },
+      ];
+    }
+
+    const [total, runs] = await Promise.all([
+      prisma.taskModelRun.count({ where }),
+      prisma.taskModelRun.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+        skip: offset,
+        select: {
+          id: true,
+          taskId: true,
+          modelKey: true,
+          provider: true,
+          modelName: true,
+          purpose: true,
+          status: true,
+          error: true,
+          startedAt: true,
+          completedAt: true,
+          createdAt: true,
+          responseText: true,
+          task: {
+            select: {
+              keyword: true,
+              searchType: true,
+              createdAt: true,
+              user: { select: { id: true, email: true, name: true } },
+            },
+          },
+        },
+      }),
+    ]);
+
+    const items = runs.map((r) => {
+      const latencyMs =
+        r.startedAt && r.completedAt ? Math.max(0, r.completedAt.getTime() - r.startedAt.getTime()) : null;
+      const responsePreview = typeof r.responseText === 'string' ? r.responseText.slice(0, 800) : null;
+      return {
+        id: r.id,
+        taskId: r.taskId,
+        taskKeyword: r.task.keyword,
+        taskSearchType: r.task.searchType,
+        user: r.task.user ? { id: r.task.user.id, email: r.task.user.email, name: r.task.user.name } : null,
+        modelKey: r.modelKey,
+        provider: r.provider,
+        modelName: r.modelName,
+        purpose: r.purpose,
+        status: r.status,
+        error: r.error,
+        startedAt: r.startedAt,
+        completedAt: r.completedAt,
+        createdAt: r.createdAt,
+        latencyMs,
+        responsePreview,
+      };
+    });
+
+    res.json({ total, limit, offset, items });
+  } catch (error) {
+    console.error('Failed to get runs (admin)', error);
+    res.status(500).json({ error: 'Failed to get runs' });
+  }
+});
+
+// 7.5 全站扣费记录（管理员）
+app.get('/api/admin/points-logs', requireAdmin(), async (req, res) => {
+  const rawLimit = Array.isArray((req.query as any).limit) ? (req.query as any).limit[0] : (req.query as any).limit;
+  const limit = Math.min(500, Math.max(1, Number.parseInt(String(rawLimit || '200'), 10) || 200));
+
+  const rawOffset = Array.isArray((req.query as any).offset) ? (req.query as any).offset[0] : (req.query as any).offset;
+  const offset = Math.min(50000, Math.max(0, Number.parseInt(String(rawOffset || '0'), 10) || 0));
+
+  const rawUserId = Array.isArray((req.query as any).userId) ? (req.query as any).userId[0] : (req.query as any).userId;
+  const userId = Number.parseInt(String(rawUserId || ''), 10);
+  const userIdFilter = Number.isFinite(userId) ? userId : null;
+
+  const rawEmail = Array.isArray((req.query as any).email) ? (req.query as any).email[0] : (req.query as any).email;
+  const email = typeof rawEmail === 'string' ? rawEmail.trim() : '';
+
+  const rawType = Array.isArray((req.query as any).type) ? (req.query as any).type[0] : (req.query as any).type;
+  const type =
+    rawType === 'RECHARGE' || rawType === 'CONSUME' || rawType === 'ADMIN_ADD' || rawType === 'ADMIN_SUB' || rawType === 'REFUND'
+      ? rawType
+      : null;
+
+  const rawQ = Array.isArray((req.query as any).q) ? (req.query as any).q[0] : (req.query as any).q;
+  const q = typeof rawQ === 'string' ? rawQ.trim() : '';
+  const rawFrom = Array.isArray((req.query as any).from) ? (req.query as any).from[0] : (req.query as any).from;
+  const rawTo = Array.isArray((req.query as any).to) ? (req.query as any).to[0] : (req.query as any).to;
+  const { from, to } = parseDateRangeShanghai({ from: rawFrom, to: rawTo });
+
+  try {
+    const where: any = {};
+    if (userIdFilter) where.userId = userIdFilter;
+    if (type) where.type = type;
+    if (q) where.description = { contains: q, mode: 'insensitive' };
+    if (email) where.user = { email: { contains: email, mode: 'insensitive' } };
+    if (from || to) where.createdAt = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+
+    const [total, logs] = await Promise.all([
+      prisma.pointsLog.count({ where }),
+      prisma.pointsLog.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+        skip: offset,
+        select: {
+          id: true,
+          createdAt: true,
+          userId: true,
+          amount: true,
+          balance: true,
+          type: true,
+          description: true,
+          operatorId: true,
+          user: { select: { id: true, email: true, name: true } },
+        },
+      }),
+    ]);
+
+    const items = logs.map((l) => ({
+      id: l.id,
+      createdAt: l.createdAt,
+      userId: l.userId,
+      user: l.user ? { id: l.user.id, email: l.user.email, name: l.user.name } : null,
+      amount: l.amount,
+      balance: l.balance,
+      type: l.type,
+      description: l.description,
+      operatorId: l.operatorId,
+    }));
+
+    res.json({ total, limit, offset, items });
+  } catch (error) {
+    console.error('Failed to get points logs (admin)', error);
+    res.status(500).json({ error: 'Failed to get points logs' });
+  }
+});
+
+// 7.6 全站浏览足迹（管理员）
+app.get('/api/admin/pageviews', requireAdmin(), async (req, res) => {
+  const rawLimit = Array.isArray((req.query as any).limit) ? (req.query as any).limit[0] : (req.query as any).limit;
+  const limit = Math.min(500, Math.max(1, Number.parseInt(String(rawLimit || '200'), 10) || 200));
+
+  const rawOffset = Array.isArray((req.query as any).offset) ? (req.query as any).offset[0] : (req.query as any).offset;
+  const offset = Math.min(50000, Math.max(0, Number.parseInt(String(rawOffset || '0'), 10) || 0));
+
+  const rawUserId = Array.isArray((req.query as any).userId) ? (req.query as any).userId[0] : (req.query as any).userId;
+  const userId = Number.parseInt(String(rawUserId || ''), 10);
+  const userIdFilter = Number.isFinite(userId) ? userId : null;
+
+  const rawEmail = Array.isArray((req.query as any).email) ? (req.query as any).email[0] : (req.query as any).email;
+  const email = typeof rawEmail === 'string' ? rawEmail.trim() : '';
+
+  const rawQ = Array.isArray((req.query as any).q) ? (req.query as any).q[0] : (req.query as any).q;
+  const q = typeof rawQ === 'string' ? rawQ.trim() : '';
+  const rawFrom = Array.isArray((req.query as any).from) ? (req.query as any).from[0] : (req.query as any).from;
+  const rawTo = Array.isArray((req.query as any).to) ? (req.query as any).to[0] : (req.query as any).to;
+  const { from, to } = parseDateRangeShanghai({ from: rawFrom, to: rawTo });
+
+  try {
+    const where: any = {};
+    if (userIdFilter) where.userId = userIdFilter;
+    if (q) where.path = { contains: q, mode: 'insensitive' };
+    if (email) where.user = { email: { contains: email, mode: 'insensitive' } };
+    if (from || to) where.createdAt = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+
+    const [total, views] = await Promise.all([
+      prisma.userPageView.count({ where }),
+      prisma.userPageView.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+        skip: offset,
+        select: {
+          id: true,
+          createdAt: true,
+          userId: true,
+          sessionId: true,
+          path: true,
+          referrer: true,
+          userAgent: true,
+          startedAt: true,
+          endedAt: true,
+          durationSeconds: true,
+          user: { select: { id: true, email: true, name: true } },
+        },
+      }),
+    ]);
+
+    const items = views.map((v) => ({
+      id: v.id,
+      createdAt: v.createdAt,
+      userId: v.userId,
+      user: v.user ? { id: v.user.id, email: v.user.email, name: v.user.name } : null,
+      sessionId: v.sessionId,
+      path: v.path,
+      referrer: v.referrer,
+      userAgent: v.userAgent,
+      startedAt: v.startedAt,
+      endedAt: v.endedAt,
+      durationSeconds: v.durationSeconds,
+    }));
+
+    res.json({ total, limit, offset, items });
+  } catch (error) {
+    console.error('Failed to get pageviews (admin)', error);
+    res.status(500).json({ error: 'Failed to get pageviews' });
+  }
+});
+
+// 7.7 统计排行（管理员）
+async function computeAdminRankings(params: { from: Date | null; to: Date | null; limit: number }) {
+  const { from, to, limit } = params;
+
+  const pageViewWhere: any = {};
+  if (from || to) pageViewWhere.createdAt = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+
+  const taskWhere: any = { userId: { not: null } };
+  if (from || to) taskWhere.createdAt = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+
+  const runWhere: any = {};
+  if (from || to) runWhere.createdAt = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+
+	  const [browsingAgg, billingAgg, runTotals] = await Promise.all([
+	    prisma.userPageView.groupBy({
+	      by: ['userId'],
+	      where: pageViewWhere,
+	      _sum: { durationSeconds: true },
+	      _count: { id: true },
+	      _max: { createdAt: true },
+	      orderBy: { _sum: { durationSeconds: 'desc' } },
+	      take: limit,
+	    }),
+	    prisma.task.groupBy({
+	      by: ['userId'],
+	      where: taskWhere,
+	      _sum: { costUnits: true, quotaUnits: true, pointsUnits: true },
+	      _count: { id: true },
+	      _max: { createdAt: true },
+	      orderBy: { _sum: { pointsUnits: 'desc' } },
+	      take: limit,
+	    }),
+	    prisma.taskModelRun.groupBy({
+	      by: ['modelKey'],
+	      where: runWhere,
+	      _count: { id: true },
+	      orderBy: { _count: { id: 'desc' } },
+	      take: limit,
+	    }),
+	  ]);
+
+  const topModelKeys = runTotals.map((r) => r.modelKey).filter((k) => typeof k === 'string' && k.trim());
+
+  const [runByPurpose, runByStatus] = await Promise.all([
+	    topModelKeys.length
+	      ? prisma.taskModelRun.groupBy({
+	          by: ['modelKey', 'purpose'],
+	          where: { ...runWhere, modelKey: { in: topModelKeys } },
+	          _count: { id: true },
+	        })
+	      : Promise.resolve([] as any[]),
+	    topModelKeys.length
+	      ? prisma.taskModelRun.groupBy({
+	          by: ['modelKey', 'status'],
+	          where: { ...runWhere, modelKey: { in: topModelKeys } },
+	          _count: { id: true },
+	        })
+	      : Promise.resolve([] as any[]),
+	  ]);
+
+  const userIds = Array.from(
+    new Set<number>([
+      ...(browsingAgg.map((x) => x.userId).filter((v) => Number.isFinite(v)) as number[]),
+      ...(billingAgg.map((x) => x.userId).filter((v) => Number.isFinite(v)) as number[]),
+    ])
+  );
+
+  const users = userIds.length
+    ? await prisma.user.findMany({
+        where: { id: { in: userIds } },
+        select: { id: true, email: true, name: true, membership: { select: { plan: true } } },
+      })
+    : [];
+  const userMap = new Map<number, any>(users.map((u) => [u.id, u]));
+
+	  const browsing = browsingAgg.map((a) => {
+	    const u = userMap.get(a.userId);
+	    return {
+	      userId: a.userId,
+	      user: u ? { id: u.id, email: u.email, name: u.name, plan: u.membership?.plan || 'FREE' } : null,
+	      durationSeconds: a._sum?.durationSeconds || 0,
+	      pageViews: (a._count as any)?.id || 0,
+	      lastActiveAt: a._max?.createdAt || null,
+	    };
+	  });
+
+	  const billing = billingAgg
+	    .filter((a) => typeof (a as any).userId === 'number')
+	    .map((a: any) => {
+	      const userId = a.userId as number;
+	      const u = userMap.get(userId);
+	    return {
+	      userId,
+	      user: u ? { id: u.id, email: u.email, name: u.name, plan: u.membership?.plan || 'FREE' } : null,
+	      tasks: a._count?.id || 0,
+	      costUnits: a._sum?.costUnits || 0,
+	      quotaUnits: a._sum?.quotaUnits || 0,
+	      pointsUnits: a._sum?.pointsUnits || 0,
+	      lastTaskAt: a._max?.createdAt || null,
+	    };
+	  });
+
+	  const purposeMap = new Map<string, any>();
+	  for (const row of runByPurpose as any[]) {
+	    const key = String(row.modelKey);
+	    const cur = purposeMap.get(key) || {};
+	    cur[String(row.purpose)] = row._count?.id || 0;
+	    purposeMap.set(key, cur);
+	  }
+	  const statusMap = new Map<string, any>();
+	  for (const row of runByStatus as any[]) {
+	    const key = String(row.modelKey);
+	    const cur = statusMap.get(key) || {};
+	    cur[String(row.status)] = row._count?.id || 0;
+	    statusMap.set(key, cur);
+	  }
+
+	  const models = runTotals.map((t) => {
+	    const modelKey = String(t.modelKey);
+	    const purposes = purposeMap.get(modelKey) || {};
+	    const statuses = statusMap.get(modelKey) || {};
+	    return {
+	      modelKey,
+	      totalRuns: (t._count as any)?.id || 0,
+	      modelRuns: purposes.MODEL || 0,
+	      analysisRuns: purposes.ANALYSIS || 0,
+	      succeeded: statuses.SUCCEEDED || 0,
+      failed: statuses.FAILED || 0,
+      running: statuses.RUNNING || 0,
+      pending: statuses.PENDING || 0,
+    };
+  });
+
+  return { browsing, billing, models };
+}
+
+app.get('/api/admin/rankings', requireAdmin(), async (req, res) => {
+  const rawLimit = Array.isArray((req.query as any).limit) ? (req.query as any).limit[0] : (req.query as any).limit;
+  const limit = Math.min(200, Math.max(1, Number.parseInt(String(rawLimit || '20'), 10) || 20));
+
+  const rawFrom = Array.isArray((req.query as any).from) ? (req.query as any).from[0] : (req.query as any).from;
+  const rawTo = Array.isArray((req.query as any).to) ? (req.query as any).to[0] : (req.query as any).to;
+  const { from, to } = parseDateRangeShanghai({ from: rawFrom, to: rawTo });
+
+  try {
+    const result = await computeAdminRankings({ from, to, limit });
+    res.json({
+      range: { from: from ? from.toISOString() : null, to: to ? to.toISOString() : null },
+      ...result,
+    });
+  } catch (error) {
+    console.error('Failed to get admin rankings', error);
+    res.status(500).json({ error: 'Failed to get rankings' });
+  }
+});
+
+// --- Admin Export (CSV) ---
+
+app.get('/api/admin/export/rankings.csv', requireAdmin(), async (req, res) => {
+  const rawKind = Array.isArray((req.query as any).kind) ? (req.query as any).kind[0] : (req.query as any).kind;
+  const kind = rawKind === 'browsing' || rawKind === 'billing' || rawKind === 'models' ? rawKind : 'browsing';
+
+  const rawLimit = Array.isArray((req.query as any).limit) ? (req.query as any).limit[0] : (req.query as any).limit;
+  const limit = Math.min(5000, Math.max(1, Number.parseInt(String(rawLimit || '200'), 10) || 200));
+
+  const rawFrom = Array.isArray((req.query as any).from) ? (req.query as any).from[0] : (req.query as any).from;
+  const rawTo = Array.isArray((req.query as any).to) ? (req.query as any).to[0] : (req.query as any).to;
+  const { from, to } = parseDateRangeShanghai({ from: rawFrom, to: rawTo });
+
+  try {
+    const rankings = await computeAdminRankings({ from, to, limit });
+
+    if (kind === 'billing') {
+      const headers = ['userId', 'userEmail', 'userName', 'plan', 'tasks', 'costUnits', 'quotaUnits', 'pointsUnits', 'lastTaskAt'];
+      const rows = rankings.billing.map((r: any) => [
+        r.userId,
+        r.user?.email ?? '',
+        r.user?.name ?? '',
+        r.user?.plan ?? '',
+        r.tasks,
+        r.costUnits,
+        r.quotaUnits,
+        r.pointsUnits,
+        r.lastTaskAt ?? '',
+      ]);
+      const csv = toCsv(headers, rows);
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="aidso_ranking_billing_${Date.now()}.csv"`);
+      res.send(csv);
+      return;
+    }
+
+    if (kind === 'models') {
+      const headers = ['modelKey', 'totalRuns', 'modelRuns', 'analysisRuns', 'succeeded', 'failed', 'running', 'pending'];
+      const rows = rankings.models.map((r: any) => [
+        r.modelKey,
+        r.totalRuns,
+        r.modelRuns,
+        r.analysisRuns,
+        r.succeeded,
+        r.failed,
+        r.running,
+        r.pending,
+      ]);
+      const csv = toCsv(headers, rows);
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="aidso_ranking_models_${Date.now()}.csv"`);
+      res.send(csv);
+      return;
+    }
+
+    const headers = ['userId', 'userEmail', 'userName', 'plan', 'durationSeconds', 'pageViews', 'lastActiveAt'];
+    const rows = rankings.browsing.map((r: any) => [
+      r.userId,
+      r.user?.email ?? '',
+      r.user?.name ?? '',
+      r.user?.plan ?? '',
+      r.durationSeconds,
+      r.pageViews,
+      r.lastActiveAt ?? '',
+    ]);
+    const csv = toCsv(headers, rows);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="aidso_ranking_browsing_${Date.now()}.csv"`);
+    res.send(csv);
+  } catch (error) {
+    console.error('Failed to export rankings csv', error);
+    res.status(500).json({ error: 'Failed to export rankings' });
+  }
+});
+
+app.get('/api/admin/export/users.csv', requireAdmin(), async (req, res) => {
+  const rawLimit = Array.isArray((req.query as any).limit) ? (req.query as any).limit[0] : (req.query as any).limit;
+  const limit = Math.min(5000, Math.max(1, Number.parseInt(String(rawLimit || '1000'), 10) || 1000));
+
+  const rawPlan = Array.isArray((req.query as any).plan) ? (req.query as any).plan[0] : (req.query as any).plan;
+  const plan = rawPlan === 'FREE' || rawPlan === 'PRO' || rawPlan === 'ENTERPRISE' ? rawPlan : null;
+
+  const rawQ = Array.isArray((req.query as any).q) ? (req.query as any).q[0] : (req.query as any).q;
+  const q = typeof rawQ === 'string' ? rawQ.trim() : '';
+
+  const rawFrom = Array.isArray((req.query as any).from) ? (req.query as any).from[0] : (req.query as any).from;
+  const rawTo = Array.isArray((req.query as any).to) ? (req.query as any).to[0] : (req.query as any).to;
+  const { from, to } = parseDateRangeShanghai({ from: rawFrom, to: rawTo });
+
+  try {
+    const and: any[] = [];
+    if (q) {
+      and.push({
+        OR: [
+          { email: { contains: q, mode: 'insensitive' } },
+          { name: { contains: q, mode: 'insensitive' } },
+        ],
+      });
+    }
+
+    if (plan) {
+      if (plan === 'FREE') {
+        and.push({ OR: [{ membership: { is: null } }, { membership: { is: { plan: 'FREE' } } }] });
+      } else {
+        and.push({ membership: { is: { plan } } });
+      }
+    }
+
+    if (from || to) {
+      and.push({ createdAt: { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) } });
+    }
+
+    const where: any = and.length ? { AND: and } : {};
+
+    const users = await prisma.user.findMany({
+      where,
+      include: { membership: true },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+    });
+
+    const userIds = users.map((u) => u.id);
+	    const taskAgg =
+	      userIds.length > 0
+	        ? await prisma.task.groupBy({
+	            by: ['userId'],
+	            where: { userId: { in: userIds } },
+	            _count: { id: true },
+	            _sum: { pointsUnits: true },
+	          })
+	        : [];
+
+	    const taskAggByUserId = new Map<number, { tasks: number; pointsUnits: number }>();
+	    for (const row of taskAgg as any[]) {
+	      const uid = row.userId as number;
+	      taskAggByUserId.set(uid, {
+	        tasks: Number(row._count?.id || 0),
+	        pointsUnits: Number(row._sum?.pointsUnits || 0),
+	      });
+	    }
+
+    const headers = ['id', 'email', 'name', 'role', 'planKey', 'plan', 'points', 'tasks', 'pointsUnits', 'createdAt'];
+    const rows = users.map((u) => {
+      const agg = taskAggByUserId.get(u.id) || { tasks: 0, pointsUnits: 0 };
+      const planKey = u.membership?.plan || 'FREE';
+      return [
+        u.id,
+        u.email,
+        u.name ?? '',
+        u.role,
+        planKey,
+        planLabel(planKey),
+        u.points ?? 0,
+        agg.tasks,
+        agg.pointsUnits,
+        u.createdAt.toISOString(),
+      ];
+    });
+
+    const csv = toCsv(headers, rows);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="aidso_users_${Date.now()}.csv"`);
+    res.send(csv);
+  } catch (error) {
+    console.error('Failed to export users csv', error);
+    res.status(500).json({ error: 'Failed to export users' });
+  }
+});
+
+app.get('/api/admin/export/tasks.csv', requireAdmin(), async (req, res) => {
+  const rawLimit = Array.isArray((req.query as any).limit) ? (req.query as any).limit[0] : (req.query as any).limit;
+  const limit = Math.min(5000, Math.max(1, Number.parseInt(String(rawLimit || '1000'), 10) || 1000));
+
+  const rawStatus = Array.isArray((req.query as any).status) ? (req.query as any).status[0] : (req.query as any).status;
+  const status =
+    rawStatus === 'PENDING' || rawStatus === 'RUNNING' || rawStatus === 'COMPLETED' || rawStatus === 'FAILED'
+      ? rawStatus
+      : null;
+
+  const rawSearchType = Array.isArray((req.query as any).searchType) ? (req.query as any).searchType[0] : (req.query as any).searchType;
+  const searchType = rawSearchType === 'quick' || rawSearchType === 'deep' ? rawSearchType : null;
+
+  const rawUserId = Array.isArray((req.query as any).userId) ? (req.query as any).userId[0] : (req.query as any).userId;
+  const userId = Number.parseInt(String(rawUserId || ''), 10);
+  const userIdFilter = Number.isFinite(userId) ? userId : null;
+
+  const rawEmail = Array.isArray((req.query as any).email) ? (req.query as any).email[0] : (req.query as any).email;
+  const email = typeof rawEmail === 'string' ? rawEmail.trim() : '';
+
+  const rawModelKey = Array.isArray((req.query as any).modelKey) ? (req.query as any).modelKey[0] : (req.query as any).modelKey;
+  const modelKey = typeof rawModelKey === 'string' ? rawModelKey.trim() : '';
+
+  const rawQ = Array.isArray((req.query as any).q) ? (req.query as any).q[0] : (req.query as any).q;
+  const q = typeof rawQ === 'string' ? rawQ.trim() : '';
+  const rawFrom = Array.isArray((req.query as any).from) ? (req.query as any).from[0] : (req.query as any).from;
+  const rawTo = Array.isArray((req.query as any).to) ? (req.query as any).to[0] : (req.query as any).to;
+  const { from, to } = parseDateRangeShanghai({ from: rawFrom, to: rawTo });
+
+  try {
+    const where: any = {};
+    if (status) where.status = status;
+    if (searchType) where.searchType = searchType;
+    if (userIdFilter) where.userId = userIdFilter;
+    if (email) where.user = { email: { contains: email, mode: 'insensitive' } };
+    if (from || to) where.createdAt = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+    if (modelKey) where.modelRuns = { some: { modelKey: { contains: modelKey, mode: 'insensitive' } } };
+    if (q) {
+      where.OR = [
+        { keyword: { contains: q, mode: 'insensitive' } },
+        { user: { email: { contains: q, mode: 'insensitive' } } },
+        { user: { name: { contains: q, mode: 'insensitive' } } },
+        { modelRuns: { some: { modelKey: { contains: q, mode: 'insensitive' } } } },
+      ];
+    }
+
+    const tasks = await prisma.task.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      select: {
+        id: true,
+        createdAt: true,
+        status: true,
+        progress: true,
+        searchType: true,
+        keyword: true,
+        usageDate: true,
+        costUnits: true,
+        quotaUnits: true,
+        pointsUnits: true,
+        selectedModels: true,
+        logs: true,
+        result: true,
+        user: { select: { id: true, email: true, name: true } },
+      },
+    });
+
+    const headers = [
+      'id',
+      'createdAt',
+      'status',
+      'progress',
+      'searchType',
+      'keyword',
+      'userId',
+      'userEmail',
+      'userName',
+      'usageDate',
+      'costUnits',
+      'quotaUnits',
+      'pointsUnits',
+      'selectedModelsJson',
+      'resultSummary',
+      'analysisSummary',
+      'logs',
+      'resultJson',
+    ];
+
+    const rows = tasks.map((t) => {
+      const result: any = t.result as any;
+      const resultSummary = typeof result?.summary === 'string' ? result.summary : '';
+      const analysisSummary = typeof result?.analysis?.summary === 'string' ? result.analysis.summary : '';
+      const logs = Array.isArray(t.logs) ? t.logs.join('\n') : '';
+      return [
+        t.id,
+        t.createdAt,
+        t.status,
+        t.progress,
+        t.searchType,
+        t.keyword,
+        t.user?.id ?? '',
+        t.user?.email ?? '',
+        t.user?.name ?? '',
+        t.usageDate ?? '',
+        t.costUnits ?? 0,
+        t.quotaUnits ?? 0,
+        t.pointsUnits ?? 0,
+        t.selectedModels,
+        resultSummary,
+        analysisSummary,
+        logs,
+        t.result,
+      ];
+    });
+
+    const csv = toCsv(headers, rows);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="aidso_tasks_${Date.now()}.csv"`);
+    res.send(csv);
+  } catch (error) {
+    console.error('Failed to export tasks csv', error);
+    res.status(500).json({ error: 'Failed to export tasks' });
+  }
+});
+
+app.get('/api/admin/export/runs.csv', requireAdmin(), async (req, res) => {
+  const rawLimit = Array.isArray((req.query as any).limit) ? (req.query as any).limit[0] : (req.query as any).limit;
+  const limit = Math.min(5000, Math.max(1, Number.parseInt(String(rawLimit || '1000'), 10) || 1000));
+
+  const rawPurpose = Array.isArray((req.query as any).purpose) ? (req.query as any).purpose[0] : (req.query as any).purpose;
+  const purpose = rawPurpose === 'MODEL' || rawPurpose === 'ANALYSIS' ? rawPurpose : null;
+
+  const rawStatus = Array.isArray((req.query as any).status) ? (req.query as any).status[0] : (req.query as any).status;
+  const status =
+    rawStatus === 'PENDING' || rawStatus === 'RUNNING' || rawStatus === 'SUCCEEDED' || rawStatus === 'FAILED'
+      ? rawStatus
+      : null;
+
+  const rawTaskId = Array.isArray((req.query as any).taskId) ? (req.query as any).taskId[0] : (req.query as any).taskId;
+  const taskId = typeof rawTaskId === 'string' ? rawTaskId.trim() : '';
+
+  const rawModelKey = Array.isArray((req.query as any).modelKey) ? (req.query as any).modelKey[0] : (req.query as any).modelKey;
+  const modelKey = typeof rawModelKey === 'string' ? rawModelKey.trim() : '';
+
+  const rawUserId = Array.isArray((req.query as any).userId) ? (req.query as any).userId[0] : (req.query as any).userId;
+  const userId = Number.parseInt(String(rawUserId || ''), 10);
+  const userIdFilter = Number.isFinite(userId) ? userId : null;
+
+  const rawEmail = Array.isArray((req.query as any).email) ? (req.query as any).email[0] : (req.query as any).email;
+  const email = typeof rawEmail === 'string' ? rawEmail.trim() : '';
+
+  const rawQ = Array.isArray((req.query as any).q) ? (req.query as any).q[0] : (req.query as any).q;
+  const q = typeof rawQ === 'string' ? rawQ.trim() : '';
+  const rawFrom = Array.isArray((req.query as any).from) ? (req.query as any).from[0] : (req.query as any).from;
+  const rawTo = Array.isArray((req.query as any).to) ? (req.query as any).to[0] : (req.query as any).to;
+  const { from, to } = parseDateRangeShanghai({ from: rawFrom, to: rawTo });
+
+  try {
+    const where: any = {};
+    if (purpose) where.purpose = purpose;
+    if (status) where.status = status;
+    if (taskId) where.taskId = taskId;
+    if (modelKey) where.modelKey = { contains: modelKey, mode: 'insensitive' };
+    if (from || to) where.createdAt = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+    if (userIdFilter) where.task = { ...(where.task || {}), userId: userIdFilter };
+    if (email) where.task = { ...(where.task || {}), user: { email: { contains: email, mode: 'insensitive' } } };
+    if (q) {
+      where.OR = [
+        { taskId: { contains: q, mode: 'insensitive' } },
+        { modelKey: { contains: q, mode: 'insensitive' } },
+        { provider: { contains: q, mode: 'insensitive' } },
+        { modelName: { contains: q, mode: 'insensitive' } },
+        { task: { keyword: { contains: q, mode: 'insensitive' } } },
+        { task: { user: { email: { contains: q, mode: 'insensitive' } } } },
+        { task: { user: { name: { contains: q, mode: 'insensitive' } } } },
+      ];
+    }
+
+    const runs = await prisma.taskModelRun.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      select: {
+        id: true,
+        taskId: true,
+        modelKey: true,
+        provider: true,
+        modelName: true,
+        purpose: true,
+        status: true,
+        error: true,
+        startedAt: true,
+        completedAt: true,
+        createdAt: true,
+        prompt: true,
+        responseText: true,
+        responseJson: true,
+        task: {
+          select: {
+            keyword: true,
+            searchType: true,
+            createdAt: true,
+            user: { select: { id: true, email: true, name: true } },
+          },
+        },
+      },
+    });
+
+    const headers = [
+      'id',
+      'createdAt',
+      'purpose',
+      'status',
+      'latencyMs',
+      'modelKey',
+      'provider',
+      'modelName',
+      'taskId',
+      'taskKeyword',
+      'taskSearchType',
+      'userId',
+      'userEmail',
+      'userName',
+      'startedAt',
+      'completedAt',
+      'error',
+      'prompt',
+      'responseText',
+      'responseJson',
+    ];
+
+    const rows = runs.map((r) => {
+      const latencyMs =
+        r.startedAt && r.completedAt ? Math.max(0, r.completedAt.getTime() - r.startedAt.getTime()) : '';
+      return [
+        r.id,
+        r.createdAt,
+        r.purpose,
+        r.status,
+        latencyMs,
+        r.modelKey,
+        r.provider ?? '',
+        r.modelName ?? '',
+        r.taskId,
+        r.task.keyword,
+        r.task.searchType,
+        r.task.user?.id ?? '',
+        r.task.user?.email ?? '',
+        r.task.user?.name ?? '',
+        r.startedAt,
+        r.completedAt,
+        r.error ?? '',
+        r.prompt ?? '',
+        r.responseText ?? '',
+        r.responseJson ?? '',
+      ];
+    });
+
+    const csv = toCsv(headers, rows);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="aidso_runs_${Date.now()}.csv"`);
+    res.send(csv);
+  } catch (error) {
+    console.error('Failed to export runs csv', error);
+    res.status(500).json({ error: 'Failed to export runs' });
+  }
+});
+
+app.get('/api/admin/export/points-logs.csv', requireAdmin(), async (req, res) => {
+  const rawLimit = Array.isArray((req.query as any).limit) ? (req.query as any).limit[0] : (req.query as any).limit;
+  const limit = Math.min(5000, Math.max(1, Number.parseInt(String(rawLimit || '2000'), 10) || 2000));
+
+  const rawUserId = Array.isArray((req.query as any).userId) ? (req.query as any).userId[0] : (req.query as any).userId;
+  const userId = Number.parseInt(String(rawUserId || ''), 10);
+  const userIdFilter = Number.isFinite(userId) ? userId : null;
+
+  const rawEmail = Array.isArray((req.query as any).email) ? (req.query as any).email[0] : (req.query as any).email;
+  const email = typeof rawEmail === 'string' ? rawEmail.trim() : '';
+
+  const rawType = Array.isArray((req.query as any).type) ? (req.query as any).type[0] : (req.query as any).type;
+  const type =
+    rawType === 'RECHARGE' || rawType === 'CONSUME' || rawType === 'ADMIN_ADD' || rawType === 'ADMIN_SUB' || rawType === 'REFUND'
+      ? rawType
+      : null;
+
+  const rawQ = Array.isArray((req.query as any).q) ? (req.query as any).q[0] : (req.query as any).q;
+  const q = typeof rawQ === 'string' ? rawQ.trim() : '';
+  const rawFrom = Array.isArray((req.query as any).from) ? (req.query as any).from[0] : (req.query as any).from;
+  const rawTo = Array.isArray((req.query as any).to) ? (req.query as any).to[0] : (req.query as any).to;
+  const { from, to } = parseDateRangeShanghai({ from: rawFrom, to: rawTo });
+
+  try {
+    const where: any = {};
+    if (userIdFilter) where.userId = userIdFilter;
+    if (type) where.type = type;
+    if (q) where.description = { contains: q, mode: 'insensitive' };
+    if (email) where.user = { email: { contains: email, mode: 'insensitive' } };
+    if (from || to) where.createdAt = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+
+    const logs = await prisma.pointsLog.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      select: {
+        id: true,
+        createdAt: true,
+        userId: true,
+        amount: true,
+        balance: true,
+        type: true,
+        description: true,
+        operatorId: true,
+        user: { select: { email: true, name: true } },
+      },
+    });
+
+    const headers = ['id', 'createdAt', 'userId', 'userEmail', 'userName', 'type', 'amount', 'balance', 'operatorId', 'description'];
+    const rows = logs.map((l) => [
+      l.id,
+      l.createdAt,
+      l.userId,
+      l.user?.email ?? '',
+      l.user?.name ?? '',
+      l.type,
+      l.amount,
+      l.balance,
+      l.operatorId ?? '',
+      l.description ?? '',
+    ]);
+
+    const csv = toCsv(headers, rows);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="aidso_points_logs_${Date.now()}.csv"`);
+    res.send(csv);
+  } catch (error) {
+    console.error('Failed to export points logs csv', error);
+    res.status(500).json({ error: 'Failed to export points logs' });
+  }
+});
+
+app.get('/api/admin/export/pageviews.csv', requireAdmin(), async (req, res) => {
+  const rawLimit = Array.isArray((req.query as any).limit) ? (req.query as any).limit[0] : (req.query as any).limit;
+  const limit = Math.min(5000, Math.max(1, Number.parseInt(String(rawLimit || '2000'), 10) || 2000));
+
+  const rawUserId = Array.isArray((req.query as any).userId) ? (req.query as any).userId[0] : (req.query as any).userId;
+  const userId = Number.parseInt(String(rawUserId || ''), 10);
+  const userIdFilter = Number.isFinite(userId) ? userId : null;
+
+  const rawEmail = Array.isArray((req.query as any).email) ? (req.query as any).email[0] : (req.query as any).email;
+  const email = typeof rawEmail === 'string' ? rawEmail.trim() : '';
+
+  const rawQ = Array.isArray((req.query as any).q) ? (req.query as any).q[0] : (req.query as any).q;
+  const q = typeof rawQ === 'string' ? rawQ.trim() : '';
+  const rawFrom = Array.isArray((req.query as any).from) ? (req.query as any).from[0] : (req.query as any).from;
+  const rawTo = Array.isArray((req.query as any).to) ? (req.query as any).to[0] : (req.query as any).to;
+  const { from, to } = parseDateRangeShanghai({ from: rawFrom, to: rawTo });
+
+  try {
+    const where: any = {};
+    if (userIdFilter) where.userId = userIdFilter;
+    if (q) where.path = { contains: q, mode: 'insensitive' };
+    if (email) where.user = { email: { contains: email, mode: 'insensitive' } };
+    if (from || to) where.createdAt = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+
+    const views = await prisma.userPageView.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      select: {
+        id: true,
+        createdAt: true,
+        userId: true,
+        sessionId: true,
+        path: true,
+        referrer: true,
+        userAgent: true,
+        startedAt: true,
+        endedAt: true,
+        durationSeconds: true,
+        user: { select: { email: true, name: true } },
+      },
+    });
+
+    const headers = [
+      'id',
+      'createdAt',
+      'userId',
+      'userEmail',
+      'userName',
+      'sessionId',
+      'path',
+      'startedAt',
+      'endedAt',
+      'durationSeconds',
+      'referrer',
+      'userAgent',
+    ];
+    const rows = views.map((v) => [
+      v.id,
+      v.createdAt,
+      v.userId,
+      v.user?.email ?? '',
+      v.user?.name ?? '',
+      v.sessionId,
+      v.path,
+      v.startedAt,
+      v.endedAt,
+      v.durationSeconds ?? '',
+      v.referrer ?? '',
+      v.userAgent ?? '',
+    ]);
+
+    const csv = toCsv(headers, rows);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="aidso_pageviews_${Date.now()}.csv"`);
+    res.send(csv);
+  } catch (error) {
+    console.error('Failed to export pageviews csv', error);
+    res.status(500).json({ error: 'Failed to export pageviews' });
+  }
 });
 
 // 7.2 查询用户点数余额和日志
@@ -1494,6 +4028,98 @@ async function simulateTaskProcessing(taskId: string, keyword: string, selectedM
         await prisma.task.update({
             where: { id: taskId },
             data: {
+                progress: 92,
+                logs: { push: '🏷️ 正在匹配品牌词...' }
+            }
+        });
+
+        // ==================== 品牌词匹配 ====================
+        try {
+            // 获取任务所属用户
+            const task = await prisma.task.findUnique({ where: { id: taskId }, select: { userId: true } });
+            if (task?.userId) {
+                // 获取用户的品牌词
+                const brandKeywords = await prisma.brandKeyword.findMany({
+                    where: { userId: task.userId, enabled: true }
+                });
+
+                if (brandKeywords.length > 0) {
+                    // 遍历每个模型的回复，匹配品牌词
+                    for (const modelKey of Object.keys(platformData)) {
+                        const response = platformData[modelKey]?.response || '';
+                        if (!response || typeof response !== 'string') continue;
+
+                        const responseText = response.toLowerCase();
+                        let rank = 1; // 用于记录品牌在回复中出现的顺序
+
+                        for (const bk of brandKeywords) {
+                            // 检查主关键词和别名
+                            const allKeywords = [bk.keyword, ...(bk.aliases || [])];
+                            let mentioned = false;
+                            let mentionCount = 0;
+                            let firstIndex = -1;
+
+                            for (const kw of allKeywords) {
+                                const kwLower = kw.toLowerCase();
+                                const regex = new RegExp(kwLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+                                const matches = response.match(regex);
+                                if (matches && matches.length > 0) {
+                                    mentioned = true;
+                                    mentionCount += matches.length;
+                                    const idx = responseText.indexOf(kwLower);
+                                    if (idx >= 0 && (firstIndex < 0 || idx < firstIndex)) {
+                                        firstIndex = idx;
+                                    }
+                                }
+                            }
+
+                            if (mentioned) {
+                                // 简单情感判断：检查品牌词前后是否有正面/负面词
+                                let sentiment = 'neutral';
+                                const positiveWords = ['推荐', '优秀', '首选', '领先', '专业', '可靠', '优质', '好评', '靠谱'];
+                                const negativeWords = ['不推荐', '差评', '问题', '投诉', '差', '坑', '骗'];
+                                
+                                // 获取品牌词周围的上下文
+                                const contextStart = Math.max(0, firstIndex - 50);
+                                const contextEnd = Math.min(response.length, firstIndex + bk.keyword.length + 100);
+                                const context = response.slice(contextStart, contextEnd);
+                                const contextLower = context.toLowerCase();
+
+                                if (positiveWords.some(w => contextLower.includes(w))) {
+                                    sentiment = 'positive';
+                                } else if (negativeWords.some(w => contextLower.includes(w))) {
+                                    sentiment = 'negative';
+                                }
+
+                                // 记录提及
+                                await prisma.brandMention.create({
+                                    data: {
+                                        brandKeywordId: bk.id,
+                                        taskId,
+                                        modelKey,
+                                        mentionCount,
+                                        rank: rank++,
+                                        sentiment,
+                                        context: context.slice(0, 200)
+                                    }
+                                });
+                            }
+                        }
+                    }
+                    await prisma.task.update({
+                        where: { id: taskId },
+                        data: { logs: { push: `✅ 品牌词匹配完成，追踪 ${brandKeywords.length} 个品牌词` } }
+                    });
+                }
+            }
+        } catch (brandErr) {
+            console.error('Brand keyword matching failed:', brandErr);
+            // 不影响主流程
+        }
+
+        await prisma.task.update({
+            where: { id: taskId },
+            data: {
                 progress: 95,
                 logs: { push: '📝 正在生成最终报告...' }
             }
@@ -1741,8 +4367,988 @@ function parseReferenceSources(content: string): Array<any> {
     return sources;
 }
 
+// ==================== 品牌监测（定时任务） API ====================
+
+function normalizeStringArray(input: any, opts: { maxItems: number; maxLen: number }) {
+  const out: string[] = [];
+  const push = (v: any) => {
+    if (typeof v !== 'string') return;
+    const s = v.trim();
+    if (!s) return;
+    if (s.length > opts.maxLen) return;
+    out.push(s);
+  };
+
+  if (Array.isArray(input)) {
+    for (const v of input) push(v);
+  } else if (typeof input === 'string') {
+    input
+      .split(/[,，\n]/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .forEach((s) => push(s));
+  }
+
+  const unique = Array.from(new Set(out));
+  return unique.slice(0, opts.maxItems);
+}
+
+function normalizeIntervalMinutes(input: any) {
+  const n = typeof input === 'number' ? input : typeof input === 'string' ? parseInt(input, 10) : NaN;
+  if (!Number.isFinite(n)) return 1440;
+  return Math.min(Math.max(n, 5), 60 * 24 * 30); // 5min ~ 30days
+}
+
+function normalizeSearchType(input: any): 'quick' | 'deep' {
+  return input === 'deep' ? 'deep' : 'quick';
+}
+
+function normalizeSelectedModels(input: any) {
+  const arr = Array.isArray(input) ? input : [];
+  const out: string[] = [];
+  for (const v of arr) {
+    if (typeof v !== 'string') continue;
+    const s = v.trim();
+    if (!s) continue;
+    out.push(s);
+  }
+  return Array.from(new Set(out)).slice(0, 30);
+}
+
+async function ensureBrandKeywordsForProject(params: {
+  userId: number;
+  brandName: string;
+  competitors: string[];
+}) {
+  const { userId, brandName, competitors } = params;
+  const names = [
+    ...(brandName ? [{ keyword: brandName, isOwn: true, color: '#7c3aed' }] : []),
+    ...competitors.map((c) => ({ keyword: c, isOwn: false, color: '#ef4444' })),
+  ];
+
+  for (const item of names) {
+    if (!item.keyword || typeof item.keyword !== 'string') continue;
+    const kw = item.keyword.trim();
+    if (!kw) continue;
+
+    const existing = await prisma.brandKeyword.findFirst({ where: { userId, keyword: kw } });
+    if (existing) continue;
+
+    await prisma.brandKeyword.create({
+      data: {
+        userId,
+        keyword: kw,
+        aliases: [],
+        category: '品牌监测',
+        isOwn: item.isOwn,
+        color: item.color,
+        enabled: true,
+      },
+    });
+  }
+}
+
+async function scheduleNextRun(projectId: string, intervalMinutes: number) {
+  const now = new Date();
+  const next = new Date(now.getTime() + intervalMinutes * 60 * 1000);
+  await prisma.monitoringProject.update({
+    where: { id: projectId },
+    data: { lastRunAt: now, nextRunAt: next, lastError: null },
+  });
+  return { lastRunAt: now, nextRunAt: next };
+}
+
+async function runMonitoringProjectNow(params: { project: any; user: any }) {
+  const { project, user } = params;
+  const keywords = Array.isArray(project.monitorKeywords) ? (project.monitorKeywords as any[]) : [];
+  const monitorKeywords = keywords.filter((k) => typeof k === 'string' && k.trim()).map((k) => k.trim());
+
+  const selectedModels =
+    Array.isArray(project.selectedModels) ? (project.selectedModels as any[]) : Array.isArray(project.selectedModels?.models) ? project.selectedModels.models : [];
+  const models = Array.isArray(selectedModels)
+    ? selectedModels.filter((m) => typeof m === 'string' && m.trim()).map((m) => m.trim())
+    : [];
+
+  if (monitorKeywords.length === 0) {
+    throw httpError(400, { error: '请先配置监测关键词' });
+  }
+  if (models.length === 0) {
+    throw httpError(400, { error: '请先选择至少一个监测模型/平台' });
+  }
+
+  const createdTasks: any[] = [];
+  const errors: any[] = [];
+
+  for (const kw of monitorKeywords) {
+    try {
+      const result = await createTaskForUser({
+        user,
+        keyword: kw,
+        searchType: project.searchType || 'quick',
+        models,
+        monitoringProjectId: project.id,
+      });
+      createdTasks.push({ ...result.task, remainingPoints: result.remainingPoints });
+    } catch (err: any) {
+      errors.push({ keyword: kw, error: err?.payload?.error || err?.message || 'Failed' });
+    }
+  }
+
+  const { lastRunAt, nextRunAt } = await scheduleNextRun(project.id, project.intervalMinutes || 1440);
+  if (errors.length > 0) {
+    const brief = errors
+      .slice(0, 5)
+      .map((e: any) => `${e.keyword}: ${e.error}`)
+      .join('；');
+    await prisma.monitoringProject.update({
+      where: { id: project.id },
+      data: { lastError: brief.slice(0, 500) },
+    });
+  }
+  return { createdTasks, errors, lastRunAt, nextRunAt };
+}
+
+app.get('/api/monitoring/projects', requireAuth(), async (req, res) => {
+  const user = (req as any).user;
+  try {
+    const items = await prisma.monitoringProject.findMany({
+      where: { userId: user.id },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        trackedWorks: { orderBy: { createdAt: 'desc' }, take: 50 },
+        _count: { select: { tasks: true, trackedWorks: true } },
+      },
+    });
+    res.json(items);
+  } catch (err) {
+    console.error('Failed to list monitoring projects', err);
+    res.status(500).json({ error: 'Failed to list monitoring projects' });
+  }
+});
+
+app.get('/api/monitoring/projects/:id', requireAuth(), async (req, res) => {
+  const user = (req as any).user;
+  const rawId = (req.params as any).id as string | string[] | undefined;
+  const id = Array.isArray(rawId) ? rawId[0] : rawId;
+  if (!id) return res.status(400).json({ error: 'Invalid id' });
+  try {
+    const project = await prisma.monitoringProject.findFirst({
+      where: { id, userId: user.id },
+      include: { trackedWorks: { orderBy: { createdAt: 'desc' }, take: 200 } },
+    });
+    if (!project) return res.status(404).json({ error: 'Not found' });
+    res.json(project);
+  } catch (err) {
+    console.error('Failed to get monitoring project', err);
+    res.status(500).json({ error: 'Failed to get monitoring project' });
+  }
+});
+
+app.post('/api/monitoring/projects', requireAuth(), async (req, res) => {
+  const user = (req as any).user;
+  try {
+    const body = req.body || {};
+    const brandName = typeof body.brandName === 'string' ? body.brandName.trim() : '';
+    if (!brandName) return res.status(400).json({ error: 'brandName is required' });
+
+    const monitorKeywords = normalizeStringArray(body.monitorKeywords, { maxItems: 50, maxLen: 80 });
+    const competitors = normalizeStringArray(body.competitors, { maxItems: 30, maxLen: 80 });
+    const negativeKeywords = normalizeStringArray(body.negativeKeywords, { maxItems: 30, maxLen: 80 });
+    const selectedModels = normalizeSelectedModels(body.selectedModels);
+    const searchType = normalizeSearchType(body.searchType);
+    const intervalMinutes = normalizeIntervalMinutes(body.intervalMinutes);
+    const enabled = typeof body.enabled === 'boolean' ? body.enabled : false;
+
+    const project = await prisma.monitoringProject.create({
+      data: {
+        userId: user.id,
+        brandName,
+        brandWebsiteUrl: typeof body.brandWebsiteUrl === 'string' && body.brandWebsiteUrl.trim() ? body.brandWebsiteUrl.trim() : null,
+        monitorKeywords,
+        competitors,
+        negativeKeywords,
+        selectedModels,
+        searchType,
+        intervalMinutes,
+        enabled,
+        nextRunAt: enabled ? new Date() : null,
+        updatedAt: new Date(),
+      },
+    });
+
+    await ensureBrandKeywordsForProject({ userId: user.id, brandName, competitors });
+    res.json(project);
+  } catch (err: any) {
+    console.error('Failed to create monitoring project', err);
+    res.status(500).json({ error: 'Failed to create monitoring project' });
+  }
+});
+
+app.patch('/api/monitoring/projects/:id', requireAuth(), async (req, res) => {
+  const user = (req as any).user;
+  const rawId = (req.params as any).id as string | string[] | undefined;
+  const id = Array.isArray(rawId) ? rawId[0] : rawId;
+  if (!id) return res.status(400).json({ error: 'Invalid id' });
+
+  try {
+    const existing = await prisma.monitoringProject.findFirst({ where: { id, userId: user.id } });
+    if (!existing) return res.status(404).json({ error: 'Not found' });
+
+    const body = req.body || {};
+    const patch: any = {};
+    if (typeof body.brandName === 'string' && body.brandName.trim()) patch.brandName = body.brandName.trim();
+    if (typeof body.brandWebsiteUrl === 'string') patch.brandWebsiteUrl = body.brandWebsiteUrl.trim() || null;
+    if (body.monitorKeywords !== undefined) patch.monitorKeywords = normalizeStringArray(body.monitorKeywords, { maxItems: 50, maxLen: 80 });
+    if (body.competitors !== undefined) patch.competitors = normalizeStringArray(body.competitors, { maxItems: 30, maxLen: 80 });
+    if (body.negativeKeywords !== undefined)
+      patch.negativeKeywords = normalizeStringArray(body.negativeKeywords, { maxItems: 30, maxLen: 80 });
+    if (body.selectedModels !== undefined) patch.selectedModels = normalizeSelectedModels(body.selectedModels);
+    if (body.searchType !== undefined) patch.searchType = normalizeSearchType(body.searchType);
+    if (body.intervalMinutes !== undefined) patch.intervalMinutes = normalizeIntervalMinutes(body.intervalMinutes);
+
+    if (typeof body.enabled === 'boolean') {
+      patch.enabled = body.enabled;
+      if (body.enabled && !existing.nextRunAt) patch.nextRunAt = new Date();
+      if (!body.enabled) patch.nextRunAt = null;
+    }
+
+    patch.updatedAt = new Date();
+
+    const project = await prisma.monitoringProject.update({ where: { id }, data: patch });
+
+    const brandName = project.brandName;
+    const competitors = Array.isArray(project.competitors) ? (project.competitors as any[]) : [];
+    await ensureBrandKeywordsForProject({
+      userId: user.id,
+      brandName,
+      competitors: competitors.filter((c) => typeof c === 'string'),
+    });
+
+    res.json(project);
+  } catch (err) {
+    console.error('Failed to update monitoring project', err);
+    res.status(500).json({ error: 'Failed to update monitoring project' });
+  }
+});
+
+app.post('/api/monitoring/projects/:id/run', requireAuth(), async (req, res) => {
+  const user = (req as any).user;
+  const rawId = (req.params as any).id as string | string[] | undefined;
+  const id = Array.isArray(rawId) ? rawId[0] : rawId;
+  if (!id) return res.status(400).json({ error: 'Invalid id' });
+
+  try {
+    const project = await prisma.monitoringProject.findFirst({ where: { id, userId: user.id } });
+    if (!project) return res.status(404).json({ error: 'Not found' });
+
+    const runUser = await prisma.user.findUnique({ where: { id: user.id }, include: { membership: true } });
+    if (!runUser) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { createdTasks, errors, lastRunAt, nextRunAt } = await runMonitoringProjectNow({ project, user: runUser });
+    res.json({ success: true, createdTasks, errors, lastRunAt, nextRunAt });
+  } catch (err: any) {
+    if (err?.status && err?.payload) return res.status(err.status).json(err.payload);
+    console.error('Failed to run monitoring project', err);
+    res.status(500).json({ error: 'Failed to run monitoring project' });
+  }
+});
+
+app.get('/api/monitoring/projects/:id/tasks', requireAuth(), async (req, res) => {
+  const user = (req as any).user;
+  const rawId = (req.params as any).id as string | string[] | undefined;
+  const id = Array.isArray(rawId) ? rawId[0] : rawId;
+  if (!id) return res.status(400).json({ error: 'Invalid id' });
+
+  const limitRaw = typeof req.query.limit === 'string' ? parseInt(req.query.limit, 10) : undefined;
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw as number, 1), 200) : 50;
+
+  try {
+    const existing = await prisma.monitoringProject.findFirst({ where: { id, userId: user.id } });
+    if (!existing) return res.status(404).json({ error: 'Not found' });
+
+    const tasks = await prisma.task.findMany({
+      where: { userId: user.id, monitoringProjectId: id },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+    });
+    res.json(tasks);
+  } catch (err) {
+    console.error('Failed to list monitoring tasks', err);
+    res.status(500).json({ error: 'Failed to list monitoring tasks' });
+  }
+});
+
+app.get('/api/monitoring/projects/:id/metrics', requireAuth(), async (req, res) => {
+  const user = (req as any).user;
+  const rawId = (req.params as any).id as string | string[] | undefined;
+  const id = Array.isArray(rawId) ? rawId[0] : rawId;
+  if (!id) return res.status(400).json({ error: 'Invalid id' });
+
+  const daysRaw = typeof req.query.days === 'string' ? parseInt(req.query.days, 10) : undefined;
+  const days = Number.isFinite(daysRaw) ? Math.min(Math.max(daysRaw as number, 1), 30) : 7;
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+  try {
+    const project = await prisma.monitoringProject.findFirst({ where: { id, userId: user.id } });
+    if (!project) return res.status(404).json({ error: 'Not found' });
+
+    const toLocalDateKey = (d: Date) => {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    };
+
+    const tasks = await prisma.task.findMany({
+      where: { monitoringProjectId: id, userId: user.id, createdAt: { gte: since } },
+      orderBy: { createdAt: 'desc' },
+      take: 300,
+      select: { id: true, createdAt: true, status: true, keyword: true },
+    });
+    const taskIds = tasks.map((t) => t.id);
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const trend: { date: string; tasks: number; mentions: number }[] = [];
+    for (let i = days - 1; i >= 0; i -= 1) {
+      const d = new Date(today.getTime() - i * 24 * 60 * 60 * 1000);
+      trend.push({ date: toLocalDateKey(d), tasks: 0, mentions: 0 });
+    }
+    const trendMap = new Map(trend.map((row) => [row.date, row]));
+    const taskDayKey = new Map<string, string>();
+    for (const t of tasks) {
+      const key = toLocalDateKey(new Date(t.createdAt));
+      taskDayKey.set(t.id, key);
+      const row = trendMap.get(key);
+      if (row) row.tasks += 1;
+    }
+
+    const runsCount = await prisma.taskModelRun.count({
+      where: {
+        taskId: { in: taskIds.length > 0 ? taskIds : ['__none__'] },
+        purpose: 'MODEL',
+        status: 'SUCCEEDED',
+      } as any,
+    });
+
+    const modelRuns = await prisma.taskModelRun.findMany({
+      where: {
+        taskId: { in: taskIds.length > 0 ? taskIds : ['__none__'] },
+        purpose: 'MODEL',
+        status: 'SUCCEEDED',
+      } as any,
+      select: { taskId: true, modelKey: true },
+    });
+    const runsByModel: Record<string, number> = {};
+    for (const run of modelRuns) {
+      const mk = String((run as any).modelKey || '').trim() || 'Unknown';
+      runsByModel[mk] = (runsByModel[mk] || 0) + 1;
+    }
+
+    const mentions = await prisma.brandMention.findMany({
+      where: {
+        taskId: { in: taskIds.length > 0 ? taskIds : ['__none__'] },
+        brandKeyword: { userId: user.id },
+      } as any,
+      select: { taskId: true, modelKey: true, mentionCount: true, sentiment: true, rank: true, brandKeyword: { select: { keyword: true, isOwn: true } } },
+    });
+
+    const ownPairs = new Set<string>();
+    const ownPairsByModel: Record<string, number> = {};
+    const ownMentionTotalsByModel: Record<string, number> = {};
+    let ownTotal = 0;
+    const competitorTotals: Record<string, number> = {};
+    const sentimentCounts = { positive: 0, negative: 0, neutral: 0 };
+    let rankSum = 0;
+    let rankCount = 0;
+
+    for (const m of mentions) {
+      const cnt = typeof m.mentionCount === 'number' ? m.mentionCount : 0;
+      if (m.brandKeyword.isOwn) {
+        const pairKey = `${m.taskId}:${m.modelKey}`;
+        if (!ownPairs.has(pairKey)) {
+          ownPairs.add(pairKey);
+          const mk = String(m.modelKey || '').trim() || 'Unknown';
+          ownPairsByModel[mk] = (ownPairsByModel[mk] || 0) + 1;
+        }
+        ownTotal += cnt;
+        const mk = String(m.modelKey || '').trim() || 'Unknown';
+        ownMentionTotalsByModel[mk] = (ownMentionTotalsByModel[mk] || 0) + cnt;
+        const s = String(m.sentiment || '').toLowerCase();
+        if (s === 'positive') sentimentCounts.positive += 1;
+        else if (s === 'negative') sentimentCounts.negative += 1;
+        else sentimentCounts.neutral += 1;
+        if (typeof m.rank === 'number') {
+          rankSum += m.rank;
+          rankCount += 1;
+        }
+
+        const dayKey = taskDayKey.get(m.taskId);
+        if (dayKey) {
+          const row = trendMap.get(dayKey);
+          if (row) row.mentions += cnt;
+        }
+      } else {
+        const key = m.brandKeyword.keyword;
+        competitorTotals[key] = (competitorTotals[key] || 0) + cnt;
+      }
+    }
+
+    const modelStats = Object.entries(runsByModel)
+      .map(([modelKey, runs]) => {
+        const pairs = ownPairsByModel[modelKey] || 0;
+        const mentionRate = runs > 0 ? Math.round((pairs / runs) * 1000) / 10 : 0;
+        const mentionsTotal = ownMentionTotalsByModel[modelKey] || 0;
+        return { modelKey, runs, mentions: mentionsTotal, mentionRate };
+      })
+      .sort((a, b) => b.mentionRate - a.mentionRate);
+
+    const mentionRate = runsCount > 0 ? Math.round((ownPairs.size / runsCount) * 1000) / 10 : 0;
+    const avgRank = rankCount > 0 ? Math.round((rankSum / rankCount) * 10) / 10 : null;
+    const positiveRatio =
+      sentimentCounts.positive + sentimentCounts.negative + sentimentCounts.neutral > 0
+        ? Math.round(
+            (sentimentCounts.positive / (sentimentCounts.positive + sentimentCounts.negative + sentimentCounts.neutral)) * 1000
+          ) / 10
+        : 0;
+
+    const score = Math.max(
+      0,
+      Math.min(100, Math.round(mentionRate * 0.6 + positiveRatio * 0.4))
+    );
+
+    const topCompetitors = Object.entries(competitorTotals)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([keyword, count]) => ({ keyword, count }));
+
+    res.json({
+      project: {
+        id: project.id,
+        brandName: project.brandName,
+        enabled: project.enabled,
+        searchType: project.searchType,
+        intervalMinutes: project.intervalMinutes,
+        lastRunAt: project.lastRunAt,
+        nextRunAt: project.nextRunAt,
+        lastError: project.lastError,
+      },
+      rangeDays: days,
+      metrics: {
+        score,
+        mentionRate,
+        avgRank,
+        weeklyMentions: ownTotal,
+        positiveRatio,
+        sentimentCounts,
+      },
+      trend,
+      modelStats,
+      competitors: topCompetitors,
+      recentTasks: tasks.slice(0, 50),
+    });
+  } catch (err) {
+    console.error('Failed to get monitoring metrics', err);
+    res.status(500).json({ error: 'Failed to get metrics' });
+  }
+});
+
+app.get('/api/monitoring/projects/:id/keywords', requireAuth(), async (req, res) => {
+  const user = (req as any).user;
+  const rawId = (req.params as any).id as string | string[] | undefined;
+  const id = Array.isArray(rawId) ? rawId[0] : rawId;
+  if (!id) return res.status(400).json({ error: 'Invalid id' });
+
+  const daysRaw = typeof req.query.days === 'string' ? parseInt(req.query.days, 10) : undefined;
+  const days = Number.isFinite(daysRaw) ? Math.min(Math.max(daysRaw as number, 1), 30) : 7;
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+  try {
+    const project = await prisma.monitoringProject.findFirst({ where: { id, userId: user.id } });
+    if (!project) return res.status(404).json({ error: 'Not found' });
+
+    const tasks = await prisma.task.findMany({
+      where: { monitoringProjectId: id, userId: user.id, createdAt: { gte: since } },
+      orderBy: { createdAt: 'desc' },
+      take: 500,
+      select: { id: true, keyword: true, createdAt: true },
+    });
+    const taskIds = tasks.map((t) => t.id);
+    const taskKeyword = new Map(tasks.map((t) => [t.id, t.keyword]));
+
+    const mentions = await prisma.brandMention.findMany({
+      where: {
+        taskId: { in: taskIds.length > 0 ? taskIds : ['__none__'] },
+        brandKeyword: { userId: user.id, isOwn: true },
+      } as any,
+      select: { taskId: true, modelKey: true, mentionCount: true, rank: true },
+    });
+
+    type ModelAgg = { mentions: number; rankSum: number; rankCount: number };
+    type KeywordAgg = { keyword: string; taskCount: number; models: Record<string, ModelAgg> };
+    const agg: Record<string, KeywordAgg> = {};
+
+    for (const t of tasks) {
+      const key = t.keyword;
+      if (!agg[key]) agg[key] = { keyword: key, taskCount: 0, models: {} };
+      agg[key].taskCount += 1;
+    }
+
+    for (const m of mentions) {
+      const kw = taskKeyword.get(m.taskId) || '';
+      if (!kw) continue;
+      if (!agg[kw]) agg[kw] = { keyword: kw, taskCount: 0, models: {} };
+      const mk = m.modelKey;
+      if (!agg[kw].models[mk]) agg[kw].models[mk] = { mentions: 0, rankSum: 0, rankCount: 0 };
+      const cnt = typeof m.mentionCount === 'number' ? m.mentionCount : 0;
+      agg[kw].models[mk].mentions += cnt;
+      if (typeof m.rank === 'number') {
+        agg[kw].models[mk].rankSum += m.rank;
+        agg[kw].models[mk].rankCount += 1;
+      }
+    }
+
+    const items = Object.values(agg)
+      .sort((a, b) => b.taskCount - a.taskCount)
+      .slice(0, 200)
+      .map((row) => ({
+        keyword: row.keyword,
+        taskCount: row.taskCount,
+        models: Object.fromEntries(
+          Object.entries(row.models).map(([modelKey, v]) => [
+            modelKey,
+            {
+              mentions: v.mentions,
+              avgRank: v.rankCount > 0 ? Math.round((v.rankSum / v.rankCount) * 10) / 10 : null,
+            },
+          ])
+        ),
+      }));
+
+    res.json({ rangeDays: days, items });
+  } catch (err) {
+    console.error('Failed to get monitoring keyword stats', err);
+    res.status(500).json({ error: 'Failed to get keyword stats' });
+  }
+});
+
+app.get('/api/monitoring/projects/:id/alerts', requireAuth(), async (req, res) => {
+  const user = (req as any).user;
+  const rawId = (req.params as any).id as string | string[] | undefined;
+  const id = Array.isArray(rawId) ? rawId[0] : rawId;
+  if (!id) return res.status(400).json({ error: 'Invalid id' });
+
+  const limitRaw = typeof req.query.limit === 'string' ? parseInt(req.query.limit, 10) : undefined;
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw as number, 1), 200) : 30;
+
+  const daysRaw = typeof req.query.days === 'string' ? parseInt(req.query.days, 10) : undefined;
+  const days = Number.isFinite(daysRaw) ? Math.min(Math.max(daysRaw as number, 1), 30) : 7;
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+  try {
+    const project = await prisma.monitoringProject.findFirst({ where: { id, userId: user.id } });
+    if (!project) return res.status(404).json({ error: 'Not found' });
+
+    const tasks = await prisma.task.findMany({
+      where: { monitoringProjectId: id, userId: user.id, createdAt: { gte: since } },
+      orderBy: { createdAt: 'desc' },
+      take: 300,
+      select: { id: true },
+    });
+    const taskIds = tasks.map((t) => t.id);
+
+    const negative = await prisma.brandMention.findMany({
+      where: {
+        taskId: { in: taskIds.length > 0 ? taskIds : ['__none__'] },
+        brandKeyword: { userId: user.id, isOwn: true },
+        sentiment: 'negative',
+        createdAt: { gte: since },
+      } as any,
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      select: { id: true, taskId: true, modelKey: true, mentionCount: true, sentiment: true, context: true, createdAt: true },
+    });
+
+    res.json({ items: negative, rangeDays: days });
+  } catch (err) {
+    console.error('Failed to get monitoring alerts', err);
+    res.status(500).json({ error: 'Failed to get alerts' });
+  }
+});
+
+app.get('/api/monitoring/projects/:id/works', requireAuth(), async (req, res) => {
+  const user = (req as any).user;
+  const rawId = (req.params as any).id as string | string[] | undefined;
+  const id = Array.isArray(rawId) ? rawId[0] : rawId;
+  if (!id) return res.status(400).json({ error: 'Invalid id' });
+  try {
+    const project = await prisma.monitoringProject.findFirst({ where: { id, userId: user.id } });
+    if (!project) return res.status(404).json({ error: 'Not found' });
+    const works = await prisma.monitoringTrackedWork.findMany({
+      where: { projectId: id },
+      orderBy: { createdAt: 'desc' },
+      take: 500,
+    });
+    res.json(works);
+  } catch (err) {
+    console.error('Failed to list monitoring works', err);
+    res.status(500).json({ error: 'Failed to list works' });
+  }
+});
+
+app.get('/api/monitoring/projects/:id/works/report', requireAuth(), async (req, res) => {
+  const user = (req as any).user;
+  const rawId = (req.params as any).id as string | string[] | undefined;
+  const id = Array.isArray(rawId) ? rawId[0] : rawId;
+  if (!id) return res.status(400).json({ error: 'Invalid id' });
+
+  const daysRaw = typeof req.query.days === 'string' ? parseInt(req.query.days, 10) : undefined;
+  const days = Number.isFinite(daysRaw) ? Math.min(Math.max(daysRaw as number, 1), 30) : 7;
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+  try {
+    const project = await prisma.monitoringProject.findFirst({ where: { id, userId: user.id } });
+    if (!project) return res.status(404).json({ error: 'Not found' });
+
+    const works = await prisma.monitoringTrackedWork.findMany({
+      where: { projectId: id, enabled: true },
+      orderBy: { createdAt: 'desc' },
+      take: 500,
+    });
+
+    const tasks = await prisma.task.findMany({
+      where: { monitoringProjectId: id, userId: user.id, createdAt: { gte: since } },
+      orderBy: { createdAt: 'desc' },
+      take: 200,
+      select: { id: true, createdAt: true, result: true },
+    });
+
+    const report = works.map((w) => ({
+      id: w.id,
+      title: w.title,
+      url: w.url,
+      enabled: w.enabled,
+      mentionCount: 0,
+      lastSeenAt: null as string | null,
+      sample: null as any,
+    }));
+
+    const byId = new Map(report.map((r) => [r.id, r]));
+
+    const matchUrl = (sourceUrl: string, targetUrl: string) => {
+      if (!sourceUrl || !targetUrl) return false;
+      if (sourceUrl === targetUrl) return true;
+      if (sourceUrl.includes(targetUrl) || targetUrl.includes(sourceUrl)) return true;
+      try {
+        const a = new URL(sourceUrl);
+        const b = new URL(targetUrl);
+        return a.hostname.replace(/^www\./, '') === b.hostname.replace(/^www\./, '') && a.pathname !== '/' && b.pathname !== '/';
+      } catch {
+        return false;
+      }
+    };
+
+    for (const t of tasks) {
+      const result = t.result as any;
+      const platformData = result?.platformData || {};
+      for (const [modelKey, data] of Object.entries(platformData)) {
+        const sources = Array.isArray((data as any)?.sources) ? ((data as any).sources as any[]) : [];
+        for (const s of sources) {
+          const sourceUrl = typeof s?.url === 'string' ? s.url : '';
+          for (const w of works) {
+            if (!matchUrl(sourceUrl, w.url)) continue;
+            const row = byId.get(w.id);
+            if (!row) continue;
+            row.mentionCount += 1;
+            const seen = t.createdAt instanceof Date ? t.createdAt.toISOString() : null;
+            if (seen && (!row.lastSeenAt || row.lastSeenAt < seen)) row.lastSeenAt = seen;
+            if (!row.sample) {
+              row.sample = { taskId: t.id, modelKey, sourceTitle: s?.title || '', sourceUrl };
+            }
+          }
+        }
+      }
+    }
+
+    res.json({ rangeDays: days, items: report.sort((a, b) => b.mentionCount - a.mentionCount) });
+  } catch (err) {
+    console.error('Failed to get works report', err);
+    res.status(500).json({ error: 'Failed to get works report' });
+  }
+});
+
+app.post('/api/monitoring/projects/:id/works', requireAuth(), async (req, res) => {
+  const user = (req as any).user;
+  const rawId = (req.params as any).id as string | string[] | undefined;
+  const id = Array.isArray(rawId) ? rawId[0] : rawId;
+  if (!id) return res.status(400).json({ error: 'Invalid id' });
+  try {
+    const project = await prisma.monitoringProject.findFirst({ where: { id, userId: user.id } });
+    if (!project) return res.status(404).json({ error: 'Not found' });
+
+    const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+    const toCreate = rows
+      .map((r: any) => ({
+        title: typeof r?.title === 'string' ? r.title.trim() : '',
+        url: typeof r?.url === 'string' ? r.url.trim() : '',
+      }))
+      .filter((r: any) => r.title && r.url)
+      .slice(0, 200);
+
+    const created = await prisma.$transaction(
+      toCreate.map((r: any) =>
+        prisma.monitoringTrackedWork.create({
+          data: { projectId: id, title: r.title, url: r.url, enabled: true },
+        })
+      )
+    );
+
+    res.json({ success: true, created });
+  } catch (err) {
+    console.error('Failed to add works', err);
+    res.status(500).json({ error: 'Failed to add works' });
+  }
+});
+
+app.delete('/api/monitoring/works/:id', requireAuth(), async (req, res) => {
+  const user = (req as any).user;
+  const rawId = (req.params as any).id as string | string[] | undefined;
+  const id = Array.isArray(rawId) ? rawId[0] : rawId;
+  if (!id) return res.status(400).json({ error: 'Invalid id' });
+  try {
+    const work = await prisma.monitoringTrackedWork.findUnique({ where: { id } });
+    if (!work) return res.status(404).json({ error: 'Not found' });
+    const project = await prisma.monitoringProject.findFirst({ where: { id: work.projectId, userId: user.id } });
+    if (!project) return res.status(403).json({ error: 'Forbidden' });
+    await prisma.monitoringTrackedWork.delete({ where: { id } });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Failed to delete work', err);
+    res.status(500).json({ error: 'Failed to delete work' });
+  }
+});
+
+// ==================== 品牌词管理 API ====================
+
+// 获取用户的品牌词列表
+app.get('/api/brand-keywords', requireAuth(), async (req, res) => {
+    try {
+        const user = (req as any).user;
+        const keywords = await prisma.brandKeyword.findMany({
+            where: { userId: user.id },
+            orderBy: { createdAt: 'desc' },
+            include: {
+                _count: {
+                    select: { mentions: true }
+                }
+            }
+        });
+        res.json(keywords);
+    } catch (error) {
+        console.error('Failed to get brand keywords:', error);
+        res.status(500).json({ error: 'Failed to get brand keywords' });
+    }
+});
+
+// 添加品牌词
+app.post('/api/brand-keywords', requireAuth(), async (req, res) => {
+    console.log('[POST /api/brand-keywords] Received request', req.body);
+    try {
+        const user = (req as any).user;
+        console.log('[POST /api/brand-keywords] User:', user?.id, user?.email);
+        const { keyword, aliases, category, isOwn, color } = req.body;
+        
+        if (!keyword || typeof keyword !== 'string' || !keyword.trim()) {
+            return res.status(400).json({ error: '品牌词不能为空' });
+        }
+
+        const existing = await prisma.brandKeyword.findFirst({
+            where: { userId: user.id, keyword: keyword.trim() }
+        });
+        if (existing) {
+            return res.status(400).json({ error: '该品牌词已存在' });
+        }
+
+        const newKeyword = await prisma.brandKeyword.create({
+            data: {
+                userId: user.id,
+                keyword: keyword.trim(),
+                aliases: Array.isArray(aliases) ? aliases.filter((a: any) => typeof a === 'string' && a.trim()).map((a: string) => a.trim()) : [],
+                category: typeof category === 'string' ? category : null,
+                isOwn: typeof isOwn === 'boolean' ? isOwn : true,
+                color: typeof color === 'string' ? color : '#7c3aed',
+            }
+        });
+        res.json(newKeyword);
+    } catch (error) {
+        console.error('Failed to add brand keyword:', error);
+        res.status(500).json({ error: 'Failed to add brand keyword' });
+    }
+});
+
+// 更新品牌词
+app.put('/api/brand-keywords/:id', requireAuth(), async (req, res) => {
+    try {
+        const user = (req as any).user;
+        const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+        const id = parseInt(idParam, 10);
+        if (!Number.isFinite(id)) {
+            return res.status(400).json({ error: 'Invalid id' });
+        }
+
+        const existing = await prisma.brandKeyword.findFirst({
+            where: { id, userId: user.id }
+        });
+        if (!existing) {
+            return res.status(404).json({ error: '品牌词不存在' });
+        }
+
+        const { keyword, aliases, category, isOwn, color, enabled } = req.body;
+        const updated = await prisma.brandKeyword.update({
+            where: { id },
+            data: {
+                ...(typeof keyword === 'string' && keyword.trim() ? { keyword: keyword.trim() } : {}),
+                ...(Array.isArray(aliases) ? { aliases: aliases.filter((a: any) => typeof a === 'string' && a.trim()).map((a: string) => a.trim()) } : {}),
+                ...(typeof category === 'string' ? { category } : {}),
+                ...(typeof isOwn === 'boolean' ? { isOwn } : {}),
+                ...(typeof color === 'string' ? { color } : {}),
+                ...(typeof enabled === 'boolean' ? { enabled } : {}),
+            }
+        });
+        res.json(updated);
+    } catch (error) {
+        console.error('Failed to update brand keyword:', error);
+        res.status(500).json({ error: 'Failed to update brand keyword' });
+    }
+});
+
+// 删除品牌词
+app.delete('/api/brand-keywords/:id', requireAuth(), async (req, res) => {
+    try {
+        const user = (req as any).user;
+        const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+        const id = parseInt(idParam, 10);
+        if (!Number.isFinite(id)) {
+            return res.status(400).json({ error: 'Invalid id' });
+        }
+
+        const existing = await prisma.brandKeyword.findFirst({
+            where: { id, userId: user.id }
+        });
+        if (!existing) {
+            return res.status(404).json({ error: '品牌词不存在' });
+        }
+
+        await prisma.brandKeyword.delete({ where: { id } });
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Failed to delete brand keyword:', error);
+        res.status(500).json({ error: 'Failed to delete brand keyword' });
+    }
+});
+
+// 获取品牌词提及统计
+app.get('/api/brand-keywords/:id/mentions', requireAuth(), async (req, res) => {
+    try {
+        const user = (req as any).user;
+        const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+        const id = parseInt(idParam, 10);
+        if (!Number.isFinite(id)) {
+            return res.status(400).json({ error: 'Invalid id' });
+        }
+
+        const keyword = await prisma.brandKeyword.findFirst({
+            where: { id, userId: user.id }
+        });
+        if (!keyword) {
+            return res.status(404).json({ error: '品牌词不存在' });
+        }
+
+        const mentions = await prisma.brandMention.findMany({
+            where: { brandKeywordId: id },
+            orderBy: { createdAt: 'desc' },
+            take: 100
+        });
+
+        // 统计
+        const totalMentions = mentions.reduce((sum, m) => sum + m.mentionCount, 0);
+        const avgRank = mentions.filter(m => m.rank).length > 0
+            ? mentions.filter(m => m.rank).reduce((sum, m) => sum + (m.rank || 0), 0) / mentions.filter(m => m.rank).length
+            : null;
+        const sentimentCounts = {
+            positive: mentions.filter(m => m.sentiment === 'positive').length,
+            negative: mentions.filter(m => m.sentiment === 'negative').length,
+            neutral: mentions.filter(m => m.sentiment === 'neutral').length,
+        };
+
+        res.json({
+            keyword,
+            mentions,
+            stats: {
+                totalMentions,
+                avgRank: avgRank ? Math.round(avgRank * 10) / 10 : null,
+                sentimentCounts,
+            }
+        });
+    } catch (error) {
+        console.error('Failed to get brand mentions:', error);
+        res.status(500).json({ error: 'Failed to get brand mentions' });
+    }
+});
+
+// 导出品牌词提及 CSV（最近 N 条）
+app.get('/api/brand-keywords/:id/mentions.csv', requireAuth(), async (req, res) => {
+    try {
+        const user = (req as any).user;
+        const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+        const id = parseInt(idParam, 10);
+        if (!Number.isFinite(id)) {
+            return res.status(400).json({ error: 'Invalid id' });
+        }
+
+        const keyword = await prisma.brandKeyword.findFirst({
+            where: { id, userId: user.id }
+        });
+        if (!keyword) {
+            return res.status(404).json({ error: '品牌词不存在' });
+        }
+
+        const limitRaw = typeof req.query.limit === 'string' ? parseInt(req.query.limit, 10) : undefined;
+        const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw as number, 1), 20000) : 5000;
+
+        const mentions = await prisma.brandMention.findMany({
+            where: { brandKeywordId: id },
+            orderBy: { createdAt: 'desc' },
+            take: limit
+        });
+
+        const csv = toCsv(
+            ['keywordId', 'keyword', 'mentionId', 'createdAt', 'taskId', 'modelKey', 'mentionCount', 'rank', 'sentiment', 'context'],
+            mentions.map((m) => [
+                keyword.id,
+                keyword.keyword,
+                m.id,
+                m.createdAt,
+                m.taskId,
+                m.modelKey,
+                m.mentionCount,
+                m.rank,
+                m.sentiment,
+                m.context,
+            ])
+        );
+
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="aidso_brand_mentions_${id}_${Date.now()}.csv"`);
+        res.send(csv);
+    } catch (error) {
+        console.error('Failed to export brand mentions csv', error);
+        res.status(500).json({ error: 'Failed to export brand mentions' });
+    }
+});
+
 // ==================== AI 追问接口 ====================
-app.post('/api/ai/follow-up', requireAuth, async (req, res) => {
+app.post('/api/ai/follow-up', requireAuth(), async (req, res) => {
     try {
         const { context, question, originalKeyword } = req.body;
         
@@ -1750,23 +5356,16 @@ app.post('/api/ai/follow-up', requireAuth, async (req, res) => {
             return res.status(400).json({ error: '问题不能为空' });
         }
 
-        // 从 config.json 中读取配置
-        const configPath = path.join(__dirname, '..', 'config.json');
-        let apiKey = '';
-        let baseUrl = 'https://api.newapi.com/v1';
+        const config = readAppConfig();
+        const picked = pickNewApiConfigStrict(config, 'DeepSeek');
+        const cfg = picked?.cfg as any;
+        const baseUrl = typeof cfg?.baseUrl === 'string' ? cfg.baseUrl : '';
+        const apiKey = typeof cfg?.apiKey === 'string' ? cfg.apiKey : '';
+        const rawModel = typeof cfg?.model === 'string' ? cfg.model : '';
+        const model = rawModel && rawModel.trim() ? rawModel.trim() : 'deepseek-chat';
 
-        try {
-            const configData = fs.readFileSync(configPath, 'utf-8');
-            const config = JSON.parse(configData);
-            apiKey = config.newapi?.api_key || '';
-            baseUrl = config.newapi?.base_url || baseUrl;
-        } catch (err) {
-            console.error('读取配置文件失败:', err);
-            return res.status(500).json({ error: '配置文件读取失败' });
-        }
-
-        if (!apiKey) {
-            return res.status(500).json({ error: 'API Key 未配置' });
+        if (!baseUrl || !apiKey) {
+            return res.status(500).json({ error: 'DeepSeek 未配置：请在后台「权限与配置 → 多模型接口配置」启用 DeepSeek 并填写 Base URL / API Key' });
         }
 
         // 使用 DeepSeek 进行智能回答
@@ -1797,7 +5396,7 @@ ${question}
 请基于以上调研结果，给出专业建议。`;
 
         const completion = await openai.chat.completions.create({
-            model: 'deepseek-chat',
+            model,
             messages: [
                 { role: 'system', content: systemPrompt },
                 { role: 'user', content: userPrompt }
@@ -1815,6 +5414,48 @@ ${question}
     }
 });
 
+function startMonitoringScheduler() {
+  const intervalMs = 60 * 1000;
+  const tick = async () => {
+    const now = new Date();
+    try {
+      const due = await prisma.monitoringProject.findMany({
+        where: {
+          enabled: true,
+          nextRunAt: { lte: now },
+        },
+        orderBy: { nextRunAt: 'asc' },
+        take: 10,
+      });
+
+      for (const project of due) {
+        try {
+          const runUser = await prisma.user.findUnique({
+            where: { id: project.userId },
+            include: { membership: true },
+          });
+          if (!runUser) continue;
+          await runMonitoringProjectNow({ project, user: runUser });
+        } catch (err: any) {
+          const msg = err?.payload?.error || err?.message || 'Failed to run monitoring project';
+          await prisma.monitoringProject
+            .update({
+              where: { id: project.id },
+              data: { lastError: String(msg).slice(0, 500), nextRunAt: new Date(Date.now() + intervalMs) },
+            })
+            .catch(() => {});
+        }
+      }
+    } catch (err) {
+      console.error('Monitoring scheduler tick failed', err);
+    }
+  };
+
+  tick();
+  setInterval(tick, intervalMs);
+}
+
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
+  startMonitoringScheduler();
 });

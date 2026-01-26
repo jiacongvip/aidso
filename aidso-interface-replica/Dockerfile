@@ -1,4 +1,5 @@
-FROM node:22-alpine
+ARG BASE_IMAGE=node:20-alpine
+FROM ${BASE_IMAGE}
 
 WORKDIR /app
 
@@ -10,4 +11,3 @@ COPY . .
 EXPOSE 3002
 
 CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "3002"]
-

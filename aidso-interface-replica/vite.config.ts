@@ -7,7 +7,10 @@ export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, '.', '');
     // NOTE: Use a project-specific env name to avoid collisions with other projects/users
     // who might have set VITE_API_PROXY_TARGET in their global shell environment.
-    const apiProxyTarget = env.AIDSO_API_PROXY_TARGET || 'http://localhost:3005';
+    const apiProxyTarget =
+      process.env.AIDSO_API_PROXY_TARGET ||
+      env.AIDSO_API_PROXY_TARGET ||
+      'http://localhost:3005';
     return {
       server: {
         port: 3002, // Frontend on 3002

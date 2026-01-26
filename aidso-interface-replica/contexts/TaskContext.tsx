@@ -20,6 +20,7 @@ interface TaskContextType {
   tasks: Task[];
   activeTaskId: string | null;
   addTask: (params: { keyword: string; searchType: 'quick' | 'deep'; models: string[] }) => Promise<void>;
+  refreshTasks: () => Promise<void>;
   minimizeTask: () => void;
   restoreTask: (id: string) => void;
   deleteTask: (id: string) => void;
@@ -93,6 +94,31 @@ export const TaskProvider = ({ children }: { children: React.ReactNode }) => {
     pollingRef.current.set(taskId, interval);
   }, [stopPolling]);
 
+  const refreshTasks = useCallback(async () => {
+    if (!token) return;
+
+    const res = await apiFetch('/api/tasks');
+    if (res.status === 401) return;
+    if (!res.ok) throw new Error('Failed to fetch');
+    const data = await res.json().catch(() => []);
+
+    const formattedTasks = Array.isArray(data) ? data.map(formatTaskFromBackend) : [];
+    setTasks(formattedTasks);
+
+    setActiveTaskId((prev) => {
+      if (prev && formattedTasks.some((t: Task) => t.id === prev)) return prev;
+      return formattedTasks[0]?.id || null;
+    });
+
+    formattedTasks.forEach((t: Task) => {
+      if (t.status === 'running' || t.status === 'pending') {
+        startPolling(t.id);
+      } else {
+        stopPolling(t.id);
+      }
+    });
+  }, [startPolling, stopPolling, token]);
+
   // Fetch tasks when token changes (login/logout)
   useEffect(() => {
     if (!token) {
@@ -103,30 +129,10 @@ export const TaskProvider = ({ children }: { children: React.ReactNode }) => {
       return;
     }
 
-    apiFetch('/api/tasks')
-      .then(async (res) => {
-        if (res.status === 401) return [];
-        if (!res.ok) throw new Error('Failed to fetch');
-        return res.json();
-      })
-      .then((data) => {
-        const formattedTasks = Array.isArray(data) ? data.map(formatTaskFromBackend) : [];
-        setTasks(formattedTasks);
-
-        setActiveTaskId((prev) => prev ?? (formattedTasks[0]?.id || null));
-
-        formattedTasks.forEach((t: Task) => {
-          if (t.status === 'running' || t.status === 'pending') {
-            startPolling(t.id);
-          } else {
-            stopPolling(t.id);
-          }
-        });
-      })
-      .catch((err) => {
-        console.error('Failed to load tasks from backend:', err);
-      });
-  }, [token, startPolling, stopPolling]);
+    refreshTasks().catch((err) => {
+      console.error('Failed to load tasks from backend:', err);
+    });
+  }, [refreshTasks, token]);
 
   const addTask = useCallback(async (params: { keyword: string; searchType: 'quick' | 'deep'; models: string[] }) => {
     const res = await apiFetch('/api/tasks', {
@@ -188,7 +194,7 @@ export const TaskProvider = ({ children }: { children: React.ReactNode }) => {
   };
 
   return (
-    <TaskContext.Provider value={{ tasks, activeTaskId, addTask, minimizeTask, restoreTask, deleteTask }}>
+    <TaskContext.Provider value={{ tasks, activeTaskId, addTask, refreshTasks, minimizeTask, restoreTask, deleteTask }}>
       {children}
     </TaskContext.Provider>
   );

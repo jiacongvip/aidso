@@ -2,56 +2,56 @@
   "newApi": {
     "models": {
       "豆包": {
-        "baseUrl": "http://8.137.117.8:80/v1",
-        "apiKey": "sk-L7PQGTjlRzjIRTHsqi3CqKYhB5z8iAguCKmIWla3kVUYLRGt",
+        "baseUrl": "",
+        "apiKey": "",
         "model": "doubao-pro-32k",
         "enabled": false
       },
       "DeepSeek": {
-        "baseUrl": "http://8.137.117.8:80/v1",
-        "apiKey": "sk-L7PQGTjlRzjIRTHsqi3CqKYhB5z8iAguCKmIWla3kVUYLRGt",
+        "baseUrl": "",
+        "apiKey": "",
         "model": "deepseek-chat",
-        "enabled": true
+        "enabled": false
       },
       "腾讯元宝": {
-        "baseUrl": "http://8.137.117.8:80/v1",
-        "apiKey": "sk-L7PQGTjlRzjIRTHsqi3CqKYhB5z8iAguCKmIWla3kVUYLRGt",
+        "baseUrl": "",
+        "apiKey": "",
         "model": "hunyuan-turbo",
         "enabled": false
       },
       "文心": {
-        "baseUrl": "http://8.137.117.8:80/v1",
-        "apiKey": "sk-L7PQGTjlRzjIRTHsqi3CqKYhB5z8iAguCKmIWla3kVUYLRGt",
+        "baseUrl": "",
+        "apiKey": "",
         "model": "ernie-4.0-turbo-8k",
         "enabled": false
       },
       "通义千问": {
-        "baseUrl": "http://8.137.117.8:80/v1",
-        "apiKey": "sk-L7PQGTjlRzjIRTHsqi3CqKYhB5z8iAguCKmIWla3kVUYLRGt",
+        "baseUrl": "",
+        "apiKey": "",
         "model": "qwen-plus",
-        "enabled": true
+        "enabled": false
       },
       "智谱GLM": {
-        "baseUrl": "http://8.137.117.8:80/v1",
-        "apiKey": "sk-L7PQGTjlRzjIRTHsqi3CqKYhB5z8iAguCKmIWla3kVUYLRGt",
+        "baseUrl": "",
+        "apiKey": "",
         "model": "glm-4",
-        "enabled": true
+        "enabled": false
       },
       "Kimi": {
-        "baseUrl": "http://8.137.117.8:80/v1",
-        "apiKey": "sk-L7PQGTjlRzjIRTHsqi3CqKYhB5z8iAguCKmIWla3kVUYLRGt",
+        "baseUrl": "",
+        "apiKey": "",
         "model": "moonshot-v1-32k",
         "enabled": false
       },
       "百度AI": {
-        "baseUrl": "http://8.137.117.8:80/v1",
-        "apiKey": "sk-L7PQGTjlRzjIRTHsqi3CqKYhB5z8iAguCKmIWla3kVUYLRGt",
+        "baseUrl": "",
+        "apiKey": "",
         "model": "ernie-speed-128k",
         "enabled": false
       }
     },
-    "baseUrl": "http://8.137.117.8:80/v1",
-    "apiKey": "sk-L7PQGTjlRzjIRTHsqi3CqKYhB5z8iAguCKmIWla3kVUYLRGt",
+    "baseUrl": "",
+    "apiKey": "",
     "model": "deepseek-chat"
   },
   "billing": {
@@ -70,6 +70,7 @@
       "腾讯元宝": 1,
       "文心": 1,
       "通义千问": 1,
+      "智谱GLM": 1,
       "Kimi": 1,
       "百度AI": 1
     }

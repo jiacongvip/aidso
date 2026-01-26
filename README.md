@@ -24,7 +24,7 @@ docker compose up --build
 
 - 登录页：`/login`
 - 个人中心：登录后点击右上角头像，或直接访问 `/me`
-- 后台管理：使用管理员账号登录后，导航栏会出现「后台管理」，或直接访问 `/admin`
+- 后台管理：管理员账号登录后，点击右上角头像进入「个人中心」→「后台管理」，或直接访问 `/admin`（登录页底部也有「管理员入口」）
 
 > 如果你本机环境里设置过其它项目的 `VITE_API_PROXY_TARGET`，可能会导致本项目前端把 `/api/*` 代理到错误地址。
 > 本项目使用 `AIDSO_API_PROXY_TARGET` 作为专用代理变量（`docker compose` 已内置），一般不需要你手动设置。
@@ -36,6 +36,11 @@ docker compose up --build
 - 打开 `http://localhost:3002/login`
 - 管理员：`admin / 111111`（用于进后台配置）
 - 普通用户：可在登录页切到「立即注册」创建账号
+  
+如果你登录/注册提示“网络错误”，通常是后端没启动或 `/api` 代理地址不对：
+
+- 先确认 `http://localhost:3005/health` 能打开
+- 再确认前端是通过 `AIDSO_API_PROXY_TARGET` 把 `/api/*` 代理到后端（默认 `http://localhost:3005`，`docker compose` 会自动配置）
 
 2) 后台配置 NewAPI（全站共用一套 KEY）
 
@@ -57,7 +62,14 @@ docker compose up --build
 - 去 `http://localhost:3002/results` 看结果
 - 在结果详情弹窗里切换到「运行记录」，可以看到每个模型调用与 DeepSeek 深度解析的落库记录（TaskModelRun）
 
-4) 计费/配额规则（按次数）
+4) 品牌监测（V1：品牌词提及追踪）
+
+- 打开 `http://localhost:3002/monitoring`（需企业版权限或管理员）
+- 点「管理品牌词」添加品牌词/别名（也可在结果页里添加）
+- 后续每次任务完成后，系统会自动在任务结果中匹配品牌词并落库
+- 监测页可按模型/情感筛选提及记录，并支持导出 CSV
+
+5) 计费/配额规则（按次数）
 
 - 任务必须登录才能执行
 - 免费版默认每天 2 次（以 `Asia/Shanghai` 计算）
@@ -105,7 +117,7 @@ docker compose up postgres -d
 ```bash
 cd aidso-interface-replica/server
 npm install
-export DATABASE_URL="postgresql://admin:password123@localhost:5432/aidso_db?schema=public"
+export DATABASE_URL="postgresql://admin:password123@localhost:5433/aidso_db?schema=public"
 export PORT=3005
 npx prisma migrate dev
 npx ts-node prisma/seed_admin.ts

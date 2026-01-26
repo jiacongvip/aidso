@@ -5,6 +5,7 @@ import { useToast } from '../contexts/ToastContext';
 import { SearchCard } from '../components/SearchCard';
 import { ResultCard, MetricItem } from '../components/ResultCard';
 import { ResultSkeleton } from '../components/ResultSkeleton';
+import { BrandKeywordModal } from '../components/BrandKeywordModal';
 import { BRANDS, PLATFORM_DATA } from '../data';
 import { useTasks } from '../contexts/TaskContext';
 import { useAuth } from '../contexts/AuthContext';
@@ -15,6 +16,197 @@ import {
   Bot, Terminal, Loader2, Trash2, Maximize2, Link as LinkIcon, ChevronRight, 
   GitFork, Star, GitBranch 
 } from 'lucide-react';
+
+// 正在执行的任务卡片组件
+const RunningTaskCard = ({ task, onOpenBrandKeywords }: { task: any; onOpenBrandKeywords?: () => void }) => {
+    const [showProgress, setShowProgress] = useState(false);
+    
+    const currentTime = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+    const currentDate = new Date().toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' }).replace('/', '-');
+
+    return (
+        <div className="w-full max-w-5xl mx-auto mt-6">
+            {/* 主卡片 - 类似 ResultCard 样式 */}
+            <div className="bg-white rounded-2xl shadow-card ring-1 ring-black/5 overflow-hidden">
+                {/* 头部区域 */}
+                <div className="p-5 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b border-gray-100">
+                    <div className="flex-1">
+                        <div className="flex items-center gap-2 mb-2">
+                            <span className="bg-gradient-to-r from-orange-500 to-amber-500 text-white text-xs font-bold px-2 py-0.5 rounded">
+                                {task.searchType === 'deep' ? '深度' : '快速'}
+                            </span>
+                            <h2 className="text-lg font-bold text-gray-900">{task.keyword}</h2>
+                        </div>
+                        <p className="text-sm text-gray-500 line-clamp-1">
+                            正在分析中，请稍候...
+                        </p>
+                        <div className="flex items-center gap-3 mt-3">
+                            <button 
+                                onClick={() => setShowProgress(!showProgress)}
+                                className="flex items-center gap-1.5 bg-brand-purple text-white px-3 py-1.5 rounded-full text-sm font-medium hover:bg-brand-purple/90 transition-colors"
+                            >
+                                <Loader2 size={14} className="animate-spin" />
+                                {showProgress ? '收起进度' : '查看进度'}
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* 右侧指标区域 */}
+                    <div className="flex items-center gap-0 border-l border-gray-100 pl-4">
+                        {/* 推荐建议 */}
+                        <div className="flex flex-col items-center justify-center px-5 min-w-[70px]">
+                            <span className="text-xs text-purple-600 font-medium mb-1 bg-purple-50 px-1.5 py-0.5 rounded">推荐建议</span>
+                            <div className="flex items-center gap-1">
+                                <Loader2 size={16} className="text-brand-purple animate-spin" />
+                            </div>
+                            <span className="text-xs text-gray-400 mt-0.5">热度值</span>
+                        </div>
+                        {/* 添加品牌词 */}
+                        <div 
+                            className="flex flex-col items-center justify-center px-5 min-w-[70px] border-l border-gray-100 cursor-pointer hover:bg-gray-50 transition-colors rounded"
+                            onClick={onOpenBrandKeywords}
+                        >
+                            <span className="text-xs text-brand-purple font-medium mb-1">+ 添加品牌词</span>
+                            <span className="text-2xl font-bold text-gray-300">-</span>
+                            <span className="text-xs text-gray-400 mt-0.5">等待中</span>
+                        </div>
+                        {/* 引用网站 */}
+                        <div className="flex flex-col items-center justify-center px-5 min-w-[70px] border-l border-gray-100">
+                            <span className="text-2xl font-bold text-gray-300">-</span>
+                            <span className="text-xs text-gray-400 mt-0.5">引用网站</span>
+                        </div>
+                        {/* 引用文章 */}
+                        <div className="flex flex-col items-center justify-center px-5 min-w-[70px] border-l border-gray-100">
+                            <span className="text-2xl font-bold text-gray-300">-</span>
+                            <span className="text-xs text-gray-400 mt-0.5">引用文章</span>
+                        </div>
+                        {/* 时间 */}
+                        <div className="flex flex-col items-center justify-center px-5 min-w-[70px] border-l border-gray-100">
+                            <span className="text-lg font-bold text-gray-700">{currentTime}</span>
+                            <span className="text-xs text-gray-400 mt-0.5">{currentDate}</span>
+                        </div>
+                    </div>
+                </div>
+
+                {/* 执行状态行 */}
+                <div className="bg-gradient-to-r from-purple-50 to-white px-5 py-3">
+                    <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                            <div className="flex items-center gap-2">
+                                <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+                                <span className="text-sm font-medium text-gray-700">正在执行中</span>
+                            </div>
+                            <span className="text-sm text-gray-500">|</span>
+                            <span className="text-sm text-gray-500">进度: <span className="font-bold text-brand-purple">{task.progress || 0}%</span></span>
+                        </div>
+                        {/* 模型列表 */}
+                        <div className="flex items-center gap-2">
+                            {task.selectedModels?.slice(0, 3).map((model: string, idx: number) => (
+                                <div key={idx} className="flex items-center gap-1.5 bg-white px-2 py-1 rounded border border-gray-200">
+                                    <Loader2 size={10} className="text-brand-purple animate-spin" />
+                                    <span className="text-xs font-medium text-gray-600">{model}</span>
+                                </div>
+                            ))}
+                            {task.selectedModels?.length > 3 && (
+                                <span className="text-xs text-gray-400">+{task.selectedModels.length - 3}</span>
+                            )}
+                        </div>
+                    </div>
+                    {/* 进度条 */}
+                    <div className="mt-2 w-full h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                        <div 
+                            className="h-full bg-gradient-to-r from-brand-purple to-purple-400 rounded-full transition-all duration-500 ease-out"
+                            style={{ width: `${task.progress || 0}%` }}
+                        ></div>
+                    </div>
+                </div>
+
+                {/* 表头 */}
+                <div className="bg-gray-50 px-5 py-2.5 grid grid-cols-12 gap-4 text-xs font-medium text-gray-500 border-y border-gray-100">
+                    <div className="col-span-2">AI对话平台</div>
+                    <div className="col-span-2 text-center hidden md:block">提及次数/排名</div>
+                    <div className="col-span-2 text-center hidden md:block">情感倾向</div>
+                    <div className="col-span-3 hidden md:block">引用来源</div>
+                    <div className="col-span-3 text-right">提及品牌</div>
+                </div>
+
+                {/* 模型行 - 等待状态 */}
+                {task.selectedModels?.map((model: string, idx: number) => (
+                    <div key={idx} className="px-5 py-3.5 grid grid-cols-12 gap-4 items-center border-b border-gray-50 last:border-b-0">
+                        <div className="col-span-6 md:col-span-2 flex items-center gap-2.5">
+                            <div className="w-8 h-8 bg-gradient-to-br from-purple-100 to-purple-50 rounded-lg flex items-center justify-center text-xs font-bold text-purple-600">
+                                {model.slice(0, 2).toUpperCase()}
+                            </div>
+                            <span className="font-medium text-gray-800 text-sm">{model}</span>
+                        </div>
+                        <div className="hidden md:flex col-span-2 justify-center">
+                            <Loader2 size={14} className="text-gray-400 animate-spin" />
+                        </div>
+                        <div className="hidden md:flex col-span-2 justify-center">
+                            <span className="text-gray-400 text-sm">-</span>
+                        </div>
+                        <div className="hidden md:block col-span-3">
+                            <span className="text-gray-400 text-sm">等待分析...</span>
+                        </div>
+                        <div className="col-span-6 md:col-span-3 flex justify-end">
+                            <span className="text-gray-400 text-sm">-</span>
+                        </div>
+                    </div>
+                ))}
+
+                {/* 底部提示 */}
+                <div className="px-5 py-3 bg-gray-50/50 flex justify-center">
+                    <span className="text-xs text-gray-400 flex items-center gap-1.5">
+                        <Loader2 size={12} className="animate-spin" />
+                        正在获取AI分析结果...
+                    </span>
+                </div>
+            </div>
+
+            {/* 展开的进度详情 */}
+            {showProgress && (
+                <div className="mt-3 bg-gray-900 rounded-xl p-4 animate-fade-in">
+                    <h3 className="text-sm font-bold text-white mb-3 flex items-center gap-2">
+                        <Terminal size={14} className="text-purple-400" />
+                        执行日志
+                    </h3>
+                    <div className="max-h-[200px] overflow-y-auto custom-scrollbar">
+                        {task.logs && task.logs.length > 0 ? (
+                            <div className="space-y-1.5">
+                                {task.logs.map((log: string, idx: number) => (
+                                    <div key={idx} className="flex items-start gap-2 text-sm font-mono">
+                                        <span className="text-gray-500 text-xs flex-shrink-0 w-6 text-right">
+                                            {String(idx + 1).padStart(2, '0')}
+                                        </span>
+                                        <span className={`${
+                                            log.includes('✅') ? 'text-green-400' :
+                                            log.includes('❌') ? 'text-red-400' :
+                                            log.includes('⚠️') ? 'text-yellow-400' :
+                                            log.includes('🤖') || log.includes('🧠') ? 'text-blue-400' :
+                                            log.includes('🔍') || log.includes('🏷️') ? 'text-purple-400' :
+                                            'text-gray-300'
+                                        }`}>
+                                            {log}
+                                        </span>
+                                    </div>
+                                ))}
+                                <div className="flex items-center gap-2 text-gray-400 text-sm mt-2 pl-8">
+                                    <Loader2 size={12} className="animate-spin" />
+                                    <span>等待下一步...</span>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="text-gray-500 text-sm flex items-center gap-2">
+                                <Loader2 size={14} className="animate-spin" />
+                                正在初始化任务...
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
 
 export const ResultsPage = () => {
     const navigate = useNavigate();
@@ -40,6 +232,7 @@ export const ResultsPage = () => {
     const [taskRunsById, setTaskRunsById] = useState<Record<string, any[]>>({});
     const [runsLoading, setRunsLoading] = useState(false);
     const [runsError, setRunsError] = useState('');
+    const [showBrandKeywordModal, setShowBrandKeywordModal] = useState(false);
 
     useEffect(() => {
         getBillingPricing().then(setPricing);
@@ -100,12 +293,6 @@ export const ResultsPage = () => {
         }
     };
 
-    const handleDelete = () => {
-        if (!activeTask) return;
-        deleteTask(activeTask.id);
-        addToast('任务已删除', 'success');
-    };
-
     // Simulate fetching trace logs when switching platforms
     useEffect(() => {
         if(showDetail) {
@@ -142,15 +329,24 @@ export const ResultsPage = () => {
                     }
                />
                
-               {(isSearching || isTaskRunning) && <ResultSkeleton />}
-               
-               {!isSearching && (isTaskCompleted || isTaskFailed) && activeTask && (
-                   <ResultCard 
-                        task={activeTask}
-                        onOpenDetail={() => setShowDetail(true)}
-                        onDelete={handleDelete}
+               {/* 任务执行状态 - 卡片样式 */}
+               {(isSearching || isTaskRunning) && activeTask && (
+                   <RunningTaskCard 
+                       task={activeTask} 
+                       onOpenBrandKeywords={() => setShowBrandKeywordModal(true)}
                    />
                )}
+
+               {/* 初始搜索时的加载状态（还没有 activeTask） */}
+               {isSearching && !activeTask && <ResultSkeleton />}
+               
+	               {!isSearching && (isTaskCompleted || isTaskFailed) && activeTask && (
+	                   <ResultCard 
+	                        task={activeTask}
+	                        onOpenDetail={() => setShowDetail(true)}
+	                        onOpenBrandKeywords={() => setShowBrandKeywordModal(true)}
+	                   />
+	               )}
                
                {!isSearching && !isTaskRunning && !activeTask && (
                     <div className="text-center py-20 text-gray-400">
@@ -578,6 +774,12 @@ export const ResultsPage = () => {
                      </div>
                 </div>
             )}
+
+            {/* 品牌词管理弹窗 */}
+            <BrandKeywordModal 
+                isOpen={showBrandKeywordModal}
+                onClose={() => setShowBrandKeywordModal(false)}
+            />
         </>
     );
 };

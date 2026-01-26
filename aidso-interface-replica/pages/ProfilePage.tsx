@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { CreditCard, BarChart3, ArrowRight, Settings, Trash2, Loader2, CheckCircle2, XCircle } from 'lucide-react';
+import { CreditCard, BarChart3, ArrowRight, Settings, Loader2, CheckCircle2, XCircle } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { apiJson } from '../services/api';
 import { useTasks } from '../contexts/TaskContext';
+import { MyBrandMentionsPanel } from '../components/MyBrandMentionsPanel';
 
 type BillingSummary = {
   usageDate: string;
@@ -13,12 +14,26 @@ type BillingSummary = {
   remainingUnits: number;
 };
 
+type Insights = {
+  rangeDays: number;
+  tasks: { total: number; last7d: number; quick: number; deep: number };
+  cost: { costUnits7d: number; quotaUnits7d: number; pointsUnits7d: number };
+  modelUsage: Record<string, number>;
+  brandMentions: {
+    sentimentCounts: { positive: number; negative: number; neutral: number };
+    topOwn: { keyword: string; count: number }[];
+    topCompetitors: { keyword: string; count: number }[];
+  };
+};
+
 export const ProfilePage = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
-  const { tasks, restoreTask, deleteTask, activeTaskId } = useTasks();
+  const { tasks, restoreTask, activeTaskId } = useTasks();
   const [summary, setSummary] = useState<BillingSummary | null>(null);
   const [loading, setLoading] = useState(true);
+  const [insights, setInsights] = useState<Insights | null>(null);
+  const [insightsLoading, setInsightsLoading] = useState(true);
 
   useEffect(() => {
     setLoading(true);
@@ -28,6 +43,16 @@ export const ProfilePage = () => {
         setSummary(data);
       })
       .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    setInsightsLoading(true);
+    apiJson<Insights>('/api/me/insights')
+      .then(({ res, data }) => {
+        if (!res.ok) return;
+        setInsights(data);
+      })
+      .finally(() => setInsightsLoading(false));
   }, []);
 
   const planLabel = useMemo(() => {
@@ -123,6 +148,56 @@ export const ProfilePage = () => {
           </div>
         </div>
 
+        <div className="mt-6 bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-sm font-bold text-gray-900">近 {insights?.rangeDays || 7} 天沉淀</div>
+            <button onClick={() => navigate('/results')} className="text-xs font-bold text-brand-purple hover:underline">
+              去看任务 →
+            </button>
+          </div>
+          {insightsLoading ? (
+            <div className="text-sm text-gray-400">加载中...</div>
+          ) : insights ? (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="bg-gray-50 rounded-xl p-4 border border-gray-100">
+                <div className="text-xs font-bold text-gray-500">任务</div>
+                <div className="mt-2 text-2xl font-extrabold text-gray-900 tabular-nums">{insights.tasks.last7d}</div>
+                <div className="text-xs text-gray-500 mt-1 tabular-nums">
+                  快速 {insights.tasks.quick} · 深度 {insights.tasks.deep}
+                </div>
+              </div>
+              <div className="bg-gray-50 rounded-xl p-4 border border-gray-100">
+                <div className="text-xs font-bold text-gray-500">消耗</div>
+                <div className="mt-2 text-2xl font-extrabold text-gray-900 tabular-nums">{insights.cost.costUnits7d}</div>
+                <div className="text-xs text-gray-500 mt-1 tabular-nums">
+                  免费抵扣 {insights.cost.quotaUnits7d} · 扣点 {insights.cost.pointsUnits7d}
+                </div>
+              </div>
+              <div className="bg-gray-50 rounded-xl p-4 border border-gray-100">
+                <div className="text-xs font-bold text-gray-500">品牌提及（Top）</div>
+                <div className="mt-2 space-y-1">
+                  {(insights.brandMentions.topOwn || []).length === 0 ? (
+                    <div className="text-xs text-gray-400">暂无（先去结果页添加品牌词）</div>
+                  ) : (
+                    (insights.brandMentions.topOwn || []).slice(0, 3).map((i) => (
+                      <div key={i.keyword} className="flex items-center justify-between text-xs">
+                        <span className="font-bold text-gray-700 truncate">{i.keyword}</span>
+                        <span className="font-mono text-gray-500 tabular-nums">{i.count}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="text-sm text-gray-400">暂无数据</div>
+          )}
+        </div>
+
+        <div className="mt-6">
+          <MyBrandMentionsPanel />
+        </div>
+
         <div className="mt-6 bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
           <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
             <div className="text-sm font-bold text-gray-900">我的任务</div>
@@ -177,13 +252,7 @@ export const ProfilePage = () => {
                     >
                       查看
                     </button>
-                    <button
-                      onClick={() => deleteTask(t.id)}
-                      className="p-2 rounded-xl border border-gray-200 text-gray-400 hover:text-red-600 hover:bg-red-50 hover:border-red-100 transition-colors"
-                      title="删除"
-                    >
-                      <Trash2 size={16} />
-                    </button>
+                    <div className="text-[10px] font-bold text-gray-400 px-2">永久保留</div>
                   </div>
                 </div>
               ))}

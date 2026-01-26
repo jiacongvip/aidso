@@ -55,7 +55,9 @@ export const LoginPage = ({ onNavigate, onLoginSuccess }: { onNavigate: (page: V
                 setError(msg);
             }
         } catch (err) {
-            setError('网络错误：无法连接到后端 API。请先确认 http://localhost:3005/health 能打开，然后再重试。');
+            setError(
+                '网络错误：无法连接到后端 API。请先确认 http://localhost:3005/health 能打开，然后再重试（也可打开 /test-proxy.html 测试 /api 代理是否正常）。'
+            );
         } finally {
             setLoading(false);
         }

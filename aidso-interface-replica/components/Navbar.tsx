@@ -48,21 +48,6 @@ export const Navbar = ({ isLanding: propIsLanding }: { isLanding?: boolean }) =>
           
           <div className="hidden md:flex items-center gap-8 text-sm font-medium text-gray-600">
             <span onClick={() => navigate('/')} className={`cursor-pointer transition-colors duration-200 ${isLanding ? 'text-gray-900 font-bold' : 'hover:text-brand-purple'}`}>首页</span>
-
-            {user && (
-              <span
-                onClick={() => navigate('/me')}
-                className="cursor-pointer transition-colors duration-200 hover:text-brand-purple"
-              >
-                个人中心
-              </span>
-            )}
-
-            {user?.role === 'ADMIN' && (
-              <span onClick={() => navigate('/admin')} className="cursor-pointer transition-colors duration-200 hover:text-brand-purple">
-                后台管理
-              </span>
-            )}
             
             <div onClick={() => checkPermission('monitoring') && navigate('/monitoring')} className={`flex items-center gap-1 cursor-pointer transition-colors duration-200 ${checkPermission('monitoring') ? 'hover:text-brand-purple' : 'text-gray-300 cursor-not-allowed'}`}>
                 品牌监测 {!checkPermission('monitoring') && <Lock size={12} />}

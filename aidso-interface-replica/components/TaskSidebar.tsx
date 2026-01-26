@@ -1,9 +1,9 @@
 import React from 'react';
 import { useTasks } from '../contexts/TaskContext';
-import { CheckCircle2, X, XCircle, ChevronLeft } from 'lucide-react';
+import { CheckCircle2, XCircle, ChevronLeft } from 'lucide-react';
 
 export const TaskSidebar = () => {
-  const { tasks, restoreTask, deleteTask, activeTaskId } = useTasks();
+  const { tasks, restoreTask, activeTaskId } = useTasks();
   const [isOpen, setIsOpen] = React.useState(true);
 
   // Filter out the active task from the sidebar (optional, or show it as active)
@@ -37,17 +37,6 @@ export const TaskSidebar = () => {
             }`}
             onClick={() => restoreTask(task.id)}
           >
-            {/* Delete Button (Hover) */}
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                deleteTask(task.id);
-              }}
-              className="absolute -top-2 -right-2 bg-white text-gray-400 hover:text-red-500 rounded-full p-0.5 border border-gray-200 shadow-sm opacity-0 group-hover:opacity-100 transition-opacity"
-            >
-              <X size={12} />
-            </button>
-
             <div className="flex items-center gap-3">
               {/* Icon / Status */}
               <div className="relative shrink-0">

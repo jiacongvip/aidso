@@ -83,6 +83,16 @@ export const PermissionSettings = () => {
     const [loading, setLoading] = useState(false);
     const [saving, setSaving] = useState(false);
     const [permLoadError, setPermLoadError] = useState('');
+    const permLoadErrorText =
+        typeof permLoadError === 'string'
+            ? permLoadError
+            : (() => {
+                  try {
+                      return JSON.stringify(permLoadError);
+                  } catch {
+                      return String(permLoadError);
+                  }
+              })();
 
     useEffect(() => {
         setLoading(true);
@@ -557,7 +567,7 @@ export const PermissionSettings = () => {
                 <div className="p-6">
                     {permLoadError && (
                         <div className="mb-4 bg-yellow-50 border border-yellow-100 text-yellow-800 text-xs rounded-lg px-4 py-3">
-                            权限配置加载异常：{permLoadError}（已使用默认值展示；请确认你是管理员登录且后端正常）
+                            权限配置加载异常：{permLoadErrorText}（已使用默认值展示；请确认你是管理员登录且后端正常）
                         </div>
                     )}
                     <div className="overflow-x-auto">

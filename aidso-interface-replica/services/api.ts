@@ -34,3 +34,13 @@ export async function apiJson<T = any>(input: RequestInfo | URL, init: RequestIn
   return { res, data: data as T };
 }
 
+export function apiErrorToMessage(data: any, fallback: string) {
+  const raw = data?.error ?? data?.message ?? data;
+  if (!raw) return fallback;
+  if (typeof raw === 'string') return raw;
+  try {
+    return JSON.stringify(raw);
+  } catch {
+    return String(raw);
+  }
+}

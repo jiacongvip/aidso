@@ -21,6 +21,9 @@ model User {
   payments  Payment[]
   membership Membership?
   pointsLogs PointsLog[]
+  pageViews  UserPageView[]
+  brandKeywords BrandKeyword[]
+  monitoringProjects MonitoringProject[]
 }
 
 enum Role {
@@ -36,6 +39,8 @@ model Task {
   searchType String  @default("quick") // quick | deep
   selectedModels Json?
   costUnits Int      @default(0)
+  quotaUnits Int     @default(0) // 从每日配额扣除的次数
+  pointsUnits Int    @default(0) // 从点数余额扣除的次数
   usageDate String?
   result    Json?
   logs      String[]
@@ -46,6 +51,12 @@ model Task {
   user      User?    @relation(fields: [userId], references: [id])
 
   modelRuns TaskModelRun[]
+
+  monitoringProjectId String?
+  monitoringProject   MonitoringProject? @relation(fields: [monitoringProjectId], references: [id], onDelete: SetNull)
+
+  @@index([userId, usageDate])
+  @@index([monitoringProjectId, createdAt])
 }
 
 enum TaskStatus {
@@ -71,6 +82,8 @@ model TaskModelRun {
   startedAt    DateTime?
   completedAt  DateTime?
   createdAt    DateTime           @default(now())
+
+  @@index([taskId, createdAt])
 }
 
 enum TaskModelRunPurpose {
@@ -138,6 +151,8 @@ model PointsLog {
   description String?
   operatorId  Int?     // 操作员ID（管理员充值时）
   createdAt   DateTime @default(now())
+
+  @@index([userId, createdAt])
 }
 
 enum PointsLogType {
@@ -146,4 +161,99 @@ enum PointsLogType {
   ADMIN_ADD  // 管理员增加
   ADMIN_SUB  // 管理员扣除
   REFUND     // 退款
+}
+
+model UserPageView {
+  id              String   @id @default(uuid())
+  userId          Int
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessionId       String
+  path            String
+  referrer        String?
+  userAgent       String?
+  startedAt       DateTime @default(now())
+  endedAt         DateTime?
+  durationSeconds Int?
+  createdAt       DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+// ==================== 品牌词追踪 ====================
+
+// 用户添加的品牌词
+model BrandKeyword {
+  id          Int      @id @default(autoincrement())
+  userId      Int
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  keyword     String   // 品牌词，如"聚推传媒"
+  aliases     String[] // 别名，如["江苏聚推", "聚推"]
+  category    String?  // 分类，如"我方品牌"、"竞品"
+  isOwn       Boolean  @default(true) // 是否是自己的品牌（区分我方/竞品）
+  color       String?  // 显示颜色，如 "#7c3aed"
+  enabled     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  mentions    BrandMention[]
+
+  @@unique([userId, keyword])
+  @@index([userId, enabled])
+}
+
+// 品牌词在任务中的提及记录
+model BrandMention {
+  id              Int      @id @default(autoincrement())
+  brandKeywordId  Int
+  brandKeyword    BrandKeyword @relation(fields: [brandKeywordId], references: [id], onDelete: Cascade)
+  taskId          String
+  modelKey        String   // 哪个模型提到的，如"豆包"
+  mentionCount    Int      @default(1) // 提及次数
+  rank            Int?     // 在推荐列表中的排名（第几个被提到）
+  sentiment       String?  // 情感倾向: positive/negative/neutral
+  context         String?  // 提及的上下文片段
+  createdAt       DateTime @default(now())
+
+  @@index([brandKeywordId, createdAt])
+  @@index([taskId, modelKey])
+}
+
+// ==================== 品牌监测（定时任务） ====================
+
+model MonitoringProject {
+  id              String   @id @default(uuid())
+  userId          Int
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brandName       String
+  brandWebsiteUrl String?
+  monitorKeywords String[] // 监测关键词列表
+  competitors     String[] // 竞品品牌名列表
+  negativeKeywords String[] // 排除词
+  selectedModels  Json?    // string[]，复用任务模型 key（如 ["DeepSeek","豆包"]）
+  searchType      String   @default("quick") // quick | deep
+  intervalMinutes Int      @default(1440) // 默认每天一次
+  enabled         Boolean  @default(false)
+  lastRunAt       DateTime?
+  nextRunAt       DateTime?
+  lastError       String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  tasks           Task[]
+  trackedWorks    MonitoringTrackedWork[]
+
+  @@index([userId, enabled])
+  @@index([nextRunAt])
+}
+
+model MonitoringTrackedWork {
+  id         String   @id @default(uuid())
+  projectId  String
+  project    MonitoringProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  title      String
+  url        String
+  enabled    Boolean  @default(true)
+  createdAt  DateTime @default(now())
+
+  @@index([projectId, createdAt])
 }

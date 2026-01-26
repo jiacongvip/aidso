@@ -1,4 +1,5 @@
-FROM node:22-alpine
+ARG BASE_IMAGE=node:20-alpine
+FROM ${BASE_IMAGE}
 
 WORKDIR /app
 
@@ -15,4 +16,3 @@ COPY config.json permissions.json ./
 EXPOSE 3005
 
 CMD ["npm", "run", "dev"]
-
