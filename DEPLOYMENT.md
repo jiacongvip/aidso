@@ -217,6 +217,16 @@ bash fix_login_500.sh
 - Prisma Client 未生成
 - 数据库中没有用户（种子数据未执行）
 - 数据库连接失败
+- API 容器启动时迁移失败
+
+**快速诊断：**
+```bash
+# 运行诊断脚本
+bash diagnose_api.sh
+
+# 或查看 API 日志
+docker-compose logs -f api
+```
 
 **快速修复：**
 ```bash
@@ -227,25 +237,53 @@ bash fix_login_500.sh
 # 1. 确保容器运行
 docker-compose up -d
 
-# 2. 执行数据库迁移
+# 2. 等待数据库就绪
+sleep 10
+
+# 3. 执行数据库迁移
 docker exec aidso_api npx prisma migrate deploy
 
-# 3. 生成 Prisma Client
+# 4. 生成 Prisma Client
 docker exec aidso_api npx prisma generate
 
-# 4. 初始化管理员账号
+# 5. 初始化管理员账号
 docker exec aidso_api npx ts-node prisma/seed_admin.ts
 
-# 5. 重启 API 服务
+# 6. 重启 API 服务
 docker-compose restart api
-```
 
-**验证修复：**
-```bash
-# 测试登录接口
+# 7. 等待服务启动
+sleep 5
+
+# 8. 验证修复
 curl -X POST http://localhost:3005/api/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"email":"admin","password":"111111"}'
+```
+
+**如果仍然返回 500：**
+```bash
+# 1. 查看详细错误日志
+docker-compose logs api | tail -50
+
+# 2. 检查数据库连接
+docker exec aidso_postgres psql -U admin -d aidso_db -c "SELECT 1;"
+
+# 3. 检查数据库表
+docker exec aidso_postgres psql -U admin -d aidso_db -c "\dt"
+
+# 4. 检查是否有用户
+docker exec aidso_postgres psql -U admin -d aidso_db -c "SELECT COUNT(*) FROM users;"
+
+# 5. 如果表不存在，重新执行迁移
+docker exec aidso_api npx prisma migrate deploy
+
+# 6. 如果用户不存在，重新执行种子
+docker exec aidso_api npx ts-node prisma/seed_admin.ts
+
+# 7. 完全重启所有服务
+docker-compose down
+docker-compose up -d
 ```
 
 #### 2. 容器启动失败
