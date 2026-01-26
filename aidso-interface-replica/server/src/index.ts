@@ -1330,11 +1330,38 @@ app.get('/api/admin/config', requireAdmin(), (req, res) => {
 
 app.post('/api/admin/config', requireAdmin(), (req, res) => {
     try {
-        fs.writeFileSync(CONFIG_FILE, JSON.stringify(req.body, null, 2));
+        // 确保目录存在
+        const configDir = path.dirname(CONFIG_FILE);
+        if (!fs.existsSync(configDir)) {
+            fs.mkdirSync(configDir, { recursive: true });
+        }
+        
+        // 验证 JSON 数据
+        const configData = req.body;
+        if (!configData || typeof configData !== 'object') {
+            return res.status(400).json({ error: 'Invalid config data' });
+        }
+        
+        // 写入文件
+        const configString = JSON.stringify(configData, null, 2);
+        fs.writeFileSync(CONFIG_FILE, configString, 'utf8');
+        
+        // 验证文件是否写入成功
+        if (!fs.existsSync(CONFIG_FILE)) {
+            throw new Error('File was not created after write');
+        }
+        
         res.json({ success: true });
-    } catch (error) {
+    } catch (error: any) {
         console.error('Failed to save config', error);
-        res.status(500).json({ error: 'Failed to save config' });
+        const errorMessage = error?.message || 'Unknown error';
+        const errorCode = error?.code || 'UNKNOWN';
+        res.status(500).json({ 
+            error: 'Failed to save config',
+            details: errorMessage,
+            code: errorCode,
+            path: CONFIG_FILE
+        });
     }
 });
 
