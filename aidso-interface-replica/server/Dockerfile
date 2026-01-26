@@ -1,6 +1,9 @@
 ARG BASE_IMAGE=node:20-alpine
 FROM ${BASE_IMAGE}
 
+# 安装 OpenSSL 和必要的依赖（Prisma 需要）
+RUN apk add --no-cache openssl libc6-compat
+
 WORKDIR /app
 
 COPY package.json package-lock.json ./

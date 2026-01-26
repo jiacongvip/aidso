@@ -36,7 +36,7 @@ services:
       DATABASE_URL: "postgresql://admin:password123@postgres:5432/aidso_db?schema=public"
     ports:
       - "3005:3005"
-    command: sh -c "npx prisma migrate deploy && npx ts-node prisma/seed_admin.ts && npm run dev"
+    command: sh -c "npx prisma migrate deploy || true && npx ts-node prisma/seed_admin.ts || true && npm run dev"
 
   web:
     build:
