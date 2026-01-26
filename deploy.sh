@@ -140,10 +140,15 @@ if [ -n "$IMPORT_DATA" ]; then
         # 自动查找最新的导出文件
         log_info "自动查找导出文件..."
         
+        # 先检查当前目录
+        log_info "当前目录: $(pwd)"
+        
         # 使用 shopt 启用 nullglob，避免通配符未匹配时返回字面量
         shopt -s nullglob
         MATCHED_FILES=( data_export_*.tar.gz )
         shopt -u nullglob
+        
+        log_info "找到 ${#MATCHED_FILES[@]} 个 .tar.gz 文件"
         
         if [ ${#MATCHED_FILES[@]} -eq 0 ]; then
             # 也尝试查找目录
@@ -151,33 +156,45 @@ if [ -n "$IMPORT_DATA" ]; then
             MATCHED_DIRS=( data_export_*/ )
             shopt -u nullglob
             
+            log_info "找到 ${#MATCHED_DIRS[@]} 个导出目录"
+            
             if [ ${#MATCHED_DIRS[@]} -gt 0 ]; then
                 # 按修改时间排序，取最新的
                 LATEST_DIR=$(ls -td data_export_*/ 2>/dev/null | head -1 | sed 's|/$||')
-                log_info "找到导出目录: $LATEST_DIR"
-                IMPORT_DATA="$LATEST_DIR"
+                if [ -n "$LATEST_DIR" ]; then
+                    log_success "找到导出目录: $LATEST_DIR"
+                    IMPORT_DATA="$LATEST_DIR"
+                else
+                    log_error "无法确定最新的导出目录"
+                    exit 1
+                fi
             else
                 log_error "未找到导出文件或目录"
                 log_info "当前目录中的文件："
-                ls -la | grep -E "data_export|\.tar\.gz" || echo "   未找到相关文件"
+                ls -la | head -20
                 log_info ""
-                log_info "请先上传导出文件到服务器，或使用完整文件名："
-                log_info "   bash deploy.sh --import-data data_export_20240101_120000.tar.gz"
+                log_info "请先上传导出文件到服务器："
+                log_info "   1. 在本地运行: bash deploy.sh --export-data"
+                log_info "   2. 上传文件: scp data_export_*.tar.gz root@服务器IP:/www/wwwroot/aidso.com/"
+                log_info "   3. 然后重新运行: bash deploy.sh --import-data auto"
                 exit 1
             fi
         else
             # 按修改时间排序，取最新的
             LATEST_FILE=$(ls -t data_export_*.tar.gz 2>/dev/null | head -1)
-            if [ -n "$LATEST_FILE" ]; then
+            if [ -n "$LATEST_FILE" ] && [ -f "$LATEST_FILE" ]; then
                 if [ ${#MATCHED_FILES[@]} -gt 1 ]; then
                     log_warn "找到多个匹配文件，使用最新的: $LATEST_FILE"
+                else
+                    log_success "找到导出文件: $LATEST_FILE"
                 fi
                 IMPORT_DATA="$LATEST_FILE"
             else
-                IMPORT_DATA="${MATCHED_FILES[0]}"
+                log_error "找到文件但无法访问: ${MATCHED_FILES[0]}"
+                exit 1
             fi
         fi
-        log_info "使用文件: $IMPORT_DATA"
+        log_info "使用文件/目录: $IMPORT_DATA"
     fi
     
     # 解压（如果是压缩包）
