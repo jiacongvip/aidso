@@ -43,8 +43,30 @@ echo ""
 log_info "启动所有服务..."
 $COMPOSE_CMD up -d
 
-log_info "等待服务启动（5秒）..."
+log_info "等待服务启动..."
 sleep 5
+
+# 等待 API 容器完全启动（不再重启）
+log_info "等待 API 容器完全启动..."
+for i in {1..60}; do
+    API_STATUS=$(docker inspect -f '{{.State.Status}}' aidso_api 2>/dev/null || echo "unknown")
+    if [ "$API_STATUS" = "running" ]; then
+        log_success "API 容器已启动"
+        break
+    fi
+    if [ "$API_STATUS" = "restarting" ]; then
+        if [ $i -eq 60 ]; then
+            log_error "API 容器一直在重启，查看日志..."
+            docker logs aidso_api --tail 50 2>&1
+            log_error "请先解决 API 容器启动问题"
+            exit 1
+        fi
+        log_info "API 容器正在重启，等待中... ($i/60)"
+        sleep 2
+    else
+        sleep 1
+    fi
+done
 
 # ==========================================
 # 2. 检查数据库连接
@@ -66,39 +88,74 @@ for i in {1..30}; do
 done
 
 # ==========================================
-# 3. 执行数据库迁移
+# 3. 检查 API 容器状态和日志
 # ==========================================
-log_step "步骤 3/5: 执行数据库迁移"
+log_step "步骤 3/6: 检查 API 容器状态"
+echo ""
+
+API_STATUS=$(docker inspect -f '{{.State.Status}}' aidso_api 2>/dev/null || echo "unknown")
+if [ "$API_STATUS" != "running" ]; then
+    log_error "API 容器状态异常: $API_STATUS"
+    log_info "查看 API 容器日志..."
+    docker logs aidso_api --tail 50 2>&1
+    echo ""
+    log_error "请先解决 API 容器启动问题，然后重新运行此脚本"
+    exit 1
+fi
+
+log_info "查看 API 容器最近日志（检查错误）..."
+docker logs aidso_api --tail 30 2>&1 | grep -i "error\|fail\|migrate\|seed" || log_info "未发现明显错误"
+echo ""
+
+# ==========================================
+# 4. 执行数据库迁移
+# ==========================================
+log_step "步骤 4/6: 执行数据库迁移"
 echo ""
 
 log_info "执行 Prisma 迁移..."
+# 等待容器完全就绪
+sleep 2
 if docker exec aidso_api npx prisma migrate deploy 2>&1; then
     log_success "数据库迁移完成"
 else
-    log_warn "迁移可能已是最新状态，继续..."
+    ERROR_OUTPUT=$(docker exec aidso_api npx prisma migrate deploy 2>&1 || true)
+    if echo "$ERROR_OUTPUT" | grep -qi "already applied\|no pending migrations"; then
+        log_success "数据库迁移已完成（无待执行迁移）"
+    else
+        log_warn "迁移执行可能失败，查看输出："
+        echo "$ERROR_OUTPUT"
+    fi
 fi
 
 echo ""
 
 # ==========================================
-# 4. 生成 Prisma Client
+# 5. 生成 Prisma Client
 # ==========================================
-log_step "步骤 4/5: 生成 Prisma Client"
+log_step "步骤 5/6: 生成 Prisma Client"
 echo ""
 
 log_info "生成 Prisma Client..."
+sleep 1
 if docker exec aidso_api npx prisma generate 2>&1; then
     log_success "Prisma Client 生成完成"
 else
-    log_warn "Prisma Client 生成可能失败，继续..."
+    ERROR_OUTPUT=$(docker exec aidso_api npx prisma generate 2>&1 || true)
+    if echo "$ERROR_OUTPUT" | grep -qi "already generated"; then
+        log_success "Prisma Client 已生成"
+    else
+        log_warn "Prisma Client 生成可能失败，查看输出："
+        echo "$ERROR_OUTPUT" | head -10
+    fi
 fi
 
 echo ""
 
 # ==========================================
-# 5. 初始化管理员账号
+# 6. 初始化管理员账号
 # ==========================================
-log_step "步骤 5/5: 初始化管理员账号"
+log_step "步骤 6/6: 初始化管理员账号"
 echo ""
 
 log_info "检查是否已有用户..."
@@ -106,11 +163,18 @@ USER_COUNT=$(docker exec aidso_postgres psql -U admin -d aidso_db -t -c "SELECT 
 
 if [ "$USER_COUNT" = "0" ] || [ -z "$USER_COUNT" ]; then
     log_info "数据库中没有用户，执行种子数据..."
+    sleep 1
     if docker exec aidso_api npx ts-node prisma/seed_admin.ts 2>&1; then
         log_success "管理员账号初始化完成"
         log_info "默认账号: admin / 111111"
     else
-        log_warn "种子数据执行可能失败，请手动检查"
+        ERROR_OUTPUT=$(docker exec aidso_api npx ts-node prisma/seed_admin.ts 2>&1 || true)
+        if echo "$ERROR_OUTPUT" | grep -qi "already exists\|duplicate"; then
+            log_success "管理员账号已存在"
+        else
+            log_warn "种子数据执行可能失败，查看输出："
+            echo "$ERROR_OUTPUT" | head -20
+        fi
     fi
 else
     log_success "数据库已有 $USER_COUNT 个用户"
@@ -119,7 +183,7 @@ fi
 echo ""
 
 # ==========================================
-# 6. 重启 API 服务
+# 7. 重启 API 服务（如果需要）
 # ==========================================
 log_step "重启 API 服务"
 echo ""
@@ -127,8 +191,28 @@ echo ""
 log_info "重启 API 容器以确保所有更改生效..."
 $COMPOSE_CMD restart api
 
-log_info "等待 API 服务启动（5秒）..."
-sleep 5
+log_info "等待 API 容器完全启动..."
+for i in {1..60}; do
+    API_STATUS=$(docker inspect -f '{{.State.Status}}' aidso_api 2>/dev/null || echo "unknown")
+    if [ "$API_STATUS" = "running" ]; then
+        # 再等待几秒确保服务完全就绪
+        sleep 3
+        log_success "API 容器已启动"
+        break
+    fi
+    if [ "$API_STATUS" = "restarting" ]; then
+        if [ $i -eq 60 ]; then
+            log_error "API 容器重启后仍在重启，查看日志..."
+            docker logs aidso_api --tail 50 2>&1
+            log_error "请检查 API 容器启动命令和配置"
+            exit 1
+        fi
+        log_info "等待 API 容器启动... ($i/60)"
+        sleep 2
+    else
+        sleep 1
+    fi
+done
 
 # ==========================================
 # 7. 验证修复
