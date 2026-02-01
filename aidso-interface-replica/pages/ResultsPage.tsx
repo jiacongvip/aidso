@@ -451,7 +451,7 @@ export const ResultsPage = () => {
                                  <div className="absolute inset-0 z-50 bg-white/60 backdrop-blur-[2px] flex flex-col items-center justify-center text-brand-purple animate-fade-in">
                                      <Loader2 size={40} className="animate-spin mb-3" />
                                      <div className="font-bold text-sm">正在同步 {selectedPlatform} 搜索记录...</div>
-                                     <div className="text-xs text-gray-500 font-mono mt-1">Downloading trace logs from upstream...</div>
+                                     <div className="text-xs text-gray-500 font-mono mt-1">正在拉取上游日志...</div>
                                  </div>
                              )}
 

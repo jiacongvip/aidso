@@ -143,7 +143,7 @@ export const LoginPage = ({ onNavigate, onLoginSuccess }: { onNavigate: (page: V
 
                      <div className="relative my-6">
                          <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-gray-100"></div></div>
-                         <div className="relative flex justify-center text-xs uppercase"><span className="bg-white px-2 text-gray-400">Or continue with</span></div>
+                         <div className="relative flex justify-center text-xs"><span className="bg-white px-2 text-gray-400">或使用以下方式</span></div>
                      </div>
 
                      <div className="grid grid-cols-2 gap-4">

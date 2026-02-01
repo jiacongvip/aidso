@@ -32,6 +32,7 @@ const LazyProfilePage = React.lazy(() => import('./pages/ProfilePage').then((m) 
 const LazyMaintenancePage = React.lazy(() =>
   import('./pages/MaintenancePage').then((m) => ({ default: m.MaintenancePage }))
 );
+const LazyNotFoundPage = React.lazy(() => import('./pages/NotFoundPage').then((m) => ({ default: m.NotFoundPage })));
 
 const MaintenanceGuard = () => {
   const { config, loading } = usePublicConfig();
@@ -136,6 +137,14 @@ const AppContent = () => {
                         <LazyApiDocPage />
                       </Suspense>
                     </PermissionGuard>
+                  }
+                />
+                <Route
+                  path="*"
+                  element={
+                    <Suspense fallback={<PageLoading />}>
+                      <LazyNotFoundPage />
+                    </Suspense>
                   }
                 />
               </Route>
