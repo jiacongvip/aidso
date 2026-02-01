@@ -1,21 +1,32 @@
-import React from 'react';
+import React, { Suspense } from 'react';
 import { BrowserRouter, Routes, Route, useNavigate } from 'react-router-dom';
 import { MainLayout } from './layouts/MainLayout';
 import { SearchProvider } from './contexts/SearchContext';
 import { AuthProvider, PermissionGuard, ProtectedRoute, useAuth } from './contexts/AuthContext';
 
-// Pages
-import { LandingPage } from './pages/LandingPage';
-import { LoginPage } from './pages/LoginPage';
-import { PricingPage } from './pages/PricingPage';
-import { ApiDocPage } from './pages/ApiDocPage';
-import { BrandMonitoringPage } from './pages/BrandMonitoringPage';
-import { ContentOptimizationPage } from './pages/ContentOptimizationPage';
-import { AdminPage } from './pages/AdminPage';
-import { AgentWorkflowPage } from './pages/AgentWorkflowPage';
-import { ResultsPage } from './pages/ResultsPage';
-import { ProfilePage } from './pages/ProfilePage';
 import { ReplicaHomePage } from './pages/ReplicaHome/ReplicaHomePage';
+
+const PageLoading = () => (
+  <div className="w-full py-24 flex items-center justify-center text-sm text-gray-400">页面加载中...</div>
+);
+
+// Route-level code splitting (reduce initial bundle size)
+const LazyLandingPage = React.lazy(() => import('./pages/LandingPage').then((m) => ({ default: m.LandingPage })));
+const LazyLoginPage = React.lazy(() => import('./pages/LoginPage').then((m) => ({ default: m.LoginPage })));
+const LazyPricingPage = React.lazy(() => import('./pages/PricingPage').then((m) => ({ default: m.PricingPage })));
+const LazyApiDocPage = React.lazy(() => import('./pages/ApiDocPage').then((m) => ({ default: m.ApiDocPage })));
+const LazyBrandMonitoringPage = React.lazy(() =>
+  import('./pages/BrandMonitoringPage').then((m) => ({ default: m.BrandMonitoringPage }))
+);
+const LazyContentOptimizationPage = React.lazy(() =>
+  import('./pages/ContentOptimizationPage').then((m) => ({ default: m.ContentOptimizationPage }))
+);
+const LazyAdminPage = React.lazy(() => import('./pages/AdminPage').then((m) => ({ default: m.AdminPage })));
+const LazyAgentWorkflowPage = React.lazy(() =>
+  import('./pages/AgentWorkflowPage').then((m) => ({ default: m.AgentWorkflowPage }))
+);
+const LazyResultsPage = React.lazy(() => import('./pages/ResultsPage').then((m) => ({ default: m.ResultsPage })));
+const LazyProfilePage = React.lazy(() => import('./pages/ProfilePage').then((m) => ({ default: m.ProfilePage })));
 
 const AppContent = () => {
     return (
@@ -24,14 +35,84 @@ const AppContent = () => {
             
             <Route element={<MainLayout />}>
                 <Route path="/" element={<PermissionGuard feature="search"><ReplicaHomePage /></PermissionGuard>} />
-                <Route path="/landing" element={<PermissionGuard feature="search"><LandingPage /></PermissionGuard>} />
-                <Route path="/results" element={<PermissionGuard feature="search"><ResultsPage /></PermissionGuard>} />
-                <Route path="/agent" element={<PermissionGuard feature="agent"><AgentWorkflowPage /></PermissionGuard>} />
-                <Route path="/monitoring" element={<PermissionGuard feature="monitoring"><BrandMonitoringPage /></PermissionGuard>} />
-                <Route path="/optimization" element={<PermissionGuard feature="optimization"><ContentOptimizationPage /></PermissionGuard>} />
-                <Route path="/me" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
-                <Route path="/pricing" element={<PricingPage />} />
-                <Route path="/api-docs" element={<PermissionGuard feature="api"><ApiDocPage /></PermissionGuard>} />
+                <Route
+                  path="/landing"
+                  element={
+                    <PermissionGuard feature="search">
+                      <Suspense fallback={<PageLoading />}>
+                        <LazyLandingPage />
+                      </Suspense>
+                    </PermissionGuard>
+                  }
+                />
+                <Route
+                  path="/results"
+                  element={
+                    <PermissionGuard feature="search">
+                      <Suspense fallback={<PageLoading />}>
+                        <LazyResultsPage />
+                      </Suspense>
+                    </PermissionGuard>
+                  }
+                />
+                <Route
+                  path="/agent"
+                  element={
+                    <PermissionGuard feature="agent">
+                      <Suspense fallback={<PageLoading />}>
+                        <LazyAgentWorkflowPage />
+                      </Suspense>
+                    </PermissionGuard>
+                  }
+                />
+                <Route
+                  path="/monitoring"
+                  element={
+                    <PermissionGuard feature="monitoring">
+                      <Suspense fallback={<PageLoading />}>
+                        <LazyBrandMonitoringPage />
+                      </Suspense>
+                    </PermissionGuard>
+                  }
+                />
+                <Route
+                  path="/optimization"
+                  element={
+                    <PermissionGuard feature="optimization">
+                      <Suspense fallback={<PageLoading />}>
+                        <LazyContentOptimizationPage />
+                      </Suspense>
+                    </PermissionGuard>
+                  }
+                />
+                <Route
+                  path="/me"
+                  element={
+                    <ProtectedRoute>
+                      <Suspense fallback={<PageLoading />}>
+                        <LazyProfilePage />
+                      </Suspense>
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/pricing"
+                  element={
+                    <Suspense fallback={<PageLoading />}>
+                      <LazyPricingPage />
+                    </Suspense>
+                  }
+                />
+                <Route
+                  path="/api-docs"
+                  element={
+                    <PermissionGuard feature="api">
+                      <Suspense fallback={<PageLoading />}>
+                        <LazyApiDocPage />
+                      </Suspense>
+                    </PermissionGuard>
+                  }
+                />
             </Route>
             
             <Route path="/admin" element={
@@ -58,7 +139,11 @@ const LoginPageWrapper = () => {
     // We need to pass a special prop or context to LoginPage to handle this better,
     // but since LoginPage is tightly coupled with `onNavigate`, let's wrap it.
     
-    return <LoginPage onNavigate={handleNavigate} onLoginSuccess={login} />;
+    return (
+      <Suspense fallback={<PageLoading />}>
+        <LazyLoginPage onNavigate={handleNavigate} onLoginSuccess={login} />
+      </Suspense>
+    );
 };
 
 const AdminPageWrapper = () => {
@@ -70,7 +155,11 @@ const AdminPageWrapper = () => {
         navigate('/login');
     };
     
-    return <AdminPage onExit={handleExit} />;
+    return (
+      <Suspense fallback={<PageLoading />}>
+        <LazyAdminPage onExit={handleExit} />
+      </Suspense>
+    );
 };
 
 const App = () => {

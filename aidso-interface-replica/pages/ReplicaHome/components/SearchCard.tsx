@@ -1,14 +1,75 @@
-import React, { useState, useEffect } from 'react';
-import { ChevronDown, Check, RotateCw } from 'lucide-react';
+import React, { useMemo, useState, useEffect } from 'react';
+import { ChevronDown, Check } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { PLATFORMS } from '../constants';
+import { useSearch } from '../../../contexts/SearchContext';
+import { useToast } from '../../../contexts/ToastContext';
+import { useTasks } from '../../../contexts/TaskContext';
+import { useAuth } from '../../../contexts/AuthContext';
+
+const PENDING_SEARCH_KEY = 'qingkuaisou_pending_search';
+const ALLOWED_MODEL_KEYS = new Set(['豆包', 'DeepSeek', '腾讯元宝', '文心', '通义千问', 'Kimi', '百度AI']);
+
+function normalizeModelKey(name: string) {
+  // Backend uses "通义千问" as the model key.
+  if (name === '千问') return '通义千问';
+  return name;
+}
 
 const SearchCard: React.FC = () => {
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const { addToast } = useToast();
+  const { addTask } = useTasks();
+  const { setQuery, setSelectedBrands, setSearchType } = useSearch();
+
   const [activeTab, setActiveTab] = useState<'search' | 'diagnosis'>('search');
   const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>(PLATFORMS.map(p => p.id));
   const [selectAll, setSelectAll] = useState(true);
   const [deepThink, setDeepThink] = useState(false);
+  const [input, setInput] = useState('');
+
+  const selectedModels = useMemo(() => {
+    const names = selectedPlatforms
+      .map((id) => PLATFORMS.find((p) => p.id === id)?.name)
+      .filter(Boolean) as string[];
+    const unique = Array.from(new Set(names.map(normalizeModelKey)));
+    return unique.filter((k) => ALLOWED_MODEL_KEYS.has(k));
+  }, [selectedPlatforms]);
+
+  const executeSearch = async (params: { keyword: string; searchType: 'quick' | 'deep'; models: string[] }) => {
+    setQuery(params.keyword);
+    setSelectedBrands(params.models);
+    setSearchType(params.searchType);
+
+    try {
+      await addTask({ keyword: params.keyword, searchType: params.searchType, models: params.models });
+      addToast('任务已创建，正在执行中...', 'success');
+      navigate('/results');
+    } catch (err: any) {
+      addToast(err?.message || '创建任务失败', 'error');
+    }
+  };
+
+  // If user just logged in, auto-run the pending search and redirect to results.
+  useEffect(() => {
+    if (!user) return;
+    const raw = sessionStorage.getItem(PENDING_SEARCH_KEY);
+    if (!raw) return;
+
+    sessionStorage.removeItem(PENDING_SEARCH_KEY);
+    try {
+      const parsed = JSON.parse(raw) as any;
+      const keyword = typeof parsed?.keyword === 'string' ? parsed.keyword.trim() : '';
+      const searchType = parsed?.searchType === 'deep' ? 'deep' : 'quick';
+      const models = Array.isArray(parsed?.models) ? parsed.models.filter((x: any) => typeof x === 'string') : [];
+      if (!keyword || models.length === 0) return;
+      executeSearch({ keyword, searchType, models });
+    } catch {
+      // ignore invalid payload
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user]);
 
   // Toggle individual platform
   const togglePlatform = (id: string) => {
@@ -37,6 +98,38 @@ const SearchCard: React.FC = () => {
       setSelectedPlatforms(PLATFORMS.map(p => p.id));
     }
     setSelectAll(!selectAll);
+  };
+
+  const handleSubmit = async () => {
+    if (activeTab === 'diagnosis') {
+      navigate('/monitoring');
+      return;
+    }
+
+    const keyword = input.trim();
+    if (!keyword) {
+      addToast('请输入搜索内容', 'info');
+      return;
+    }
+    if (selectedModels.length === 0) {
+      addToast('请至少选择一个已支持的AI模型', 'info');
+      return;
+    }
+
+    const searchType = deepThink ? 'deep' : 'quick';
+
+    // Tasks require login (backend enforces). Store intent then redirect to login.
+    if (!user) {
+      sessionStorage.setItem(
+        PENDING_SEARCH_KEY,
+        JSON.stringify({ keyword, searchType, models: selectedModels })
+      );
+      addToast('请先登录后执行任务', 'info');
+      navigate('/login');
+      return;
+    }
+
+    await executeSearch({ keyword, searchType, models: selectedModels });
   };
 
   return (
@@ -73,6 +166,11 @@ const SearchCard: React.FC = () => {
         <input 
           type="text"
           placeholder="向AI咨询的问题，如：抖音DSO哪家公司最好？"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') handleSubmit();
+          }}
           className="w-full h-14 pl-[110px] pr-4 bg-gray-50 border border-transparent rounded-xl focus:bg-white focus:border-purple-300 focus:ring-4 focus:ring-purple-100 outline-none transition-all placeholder-gray-400 text-gray-700"
         />
       </div>
@@ -136,7 +234,7 @@ const SearchCard: React.FC = () => {
       <div className="flex justify-end">
         <button
           className="bg-gradient-to-r from-[#6366f1] to-[#a855f7] text-white px-8 py-2.5 rounded-lg font-medium shadow-lg shadow-purple-200 hover:shadow-purple-300 transform hover:-translate-y-0.5 transition-all text-sm"
-          onClick={() => navigate('/results')}
+          onClick={handleSubmit}
         >
           轻快搜一下
         </button>
