@@ -7,7 +7,7 @@ import { useAuth } from '../contexts/AuthContext';
 export const Navbar = ({ isLanding: propIsLanding }: { isLanding?: boolean }) => {
   const navigate = useNavigate();
   const location = useLocation();
-  const isLanding = propIsLanding ?? location.pathname === '/';
+  const isLanding = propIsLanding ?? (location.pathname === '/' || location.pathname === '/landing');
   const { checkPermission, user, logout } = useAuth();
   
   const [showHistory, setShowHistory] = useState(false);
