@@ -1,7 +1,8 @@
 
-import React from 'react';
+import React, { useMemo } from 'react';
 import { Sparkles, ChevronDown, Check, Loader2 } from 'lucide-react';
 import { BRANDS } from '../data';
+import { usePublicConfig } from '../contexts/PublicConfigContext';
 
 interface SearchCardProps {
     searchType: 'quick' | 'deep';
@@ -17,7 +18,30 @@ interface SearchCardProps {
     className?: string;
 }
 
-export const SearchCard = ({ searchType, setSearchType, selectedBrands, toggleBrand, onSearch, isSearching, query, setQuery, estimatedCostUnits, placeholder, className }: SearchCardProps) => (
+export const SearchCard = ({ searchType, setSearchType, selectedBrands, toggleBrand, onSearch, isSearching, query, setQuery, estimatedCostUnits, placeholder, className }: SearchCardProps) => {
+    const { config: publicConfig } = usePublicConfig();
+
+    const brands = useMemo(() => {
+        const enabled = Array.isArray(publicConfig.enabledModels) && publicConfig.enabledModels.length > 0
+            ? new Set(publicConfig.enabledModels.filter((x) => typeof x === 'string'))
+            : null;
+
+        const base = enabled ? BRANDS.filter((b) => enabled.has(b.name)) : BRANDS;
+        if (!enabled) return base;
+
+        const known = new Set(base.map((b) => b.name));
+        const extras = publicConfig.enabledModels.filter((name) => typeof name === 'string' && !known.has(name));
+        const extraBrands = extras.map((name) => ({
+            name,
+            color: 'bg-gray-500',
+            icon: `https://api.dicebear.com/9.x/initials/svg?seed=${encodeURIComponent(name)}&backgroundColor=64748b`,
+            type: 'search',
+            latency: '',
+        }));
+        return [...base, ...extraBrands];
+    }, [publicConfig.enabledModels]);
+
+    return (
     <div className={`w-full max-w-5xl mx-auto bg-white rounded-2xl shadow-card ring-1 ring-black/5 p-8 mt-8 relative z-10 transition-shadow hover:shadow-lg duration-500 ${className || ''}`}>
         {/* Tab Header with Interactive State */}
         <div className="flex gap-6 mb-6 border-b border-gray-100 relative">
@@ -60,7 +84,7 @@ export const SearchCard = ({ searchType, setSearchType, selectedBrands, toggleBr
         <div className="flex items-center justify-between">
             {/* Interactive Brand Selection */}
             <div className="flex flex-wrap gap-5">
-                {BRANDS.map((brand) => {
+                {brands.map((brand) => {
                     const isSelected = selectedBrands.includes(brand.name);
                     return (
                         <div 
@@ -102,4 +126,5 @@ export const SearchCard = ({ searchType, setSearchType, selectedBrands, toggleBr
             </div>
         </div>
     </div>
-);
+    );
+};

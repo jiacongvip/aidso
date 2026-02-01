@@ -3,7 +3,7 @@ import { BrowserRouter, Routes, Route, useNavigate } from 'react-router-dom';
 import { MainLayout } from './layouts/MainLayout';
 import { SearchProvider } from './contexts/SearchContext';
 import { AuthProvider, PermissionGuard, ProtectedRoute, useAuth } from './contexts/AuthContext';
-import { SITE_NAME } from './branding';
+import { PublicConfigProvider, usePublicConfig } from './contexts/PublicConfigContext';
 
 import { ReplicaHomePage } from './pages/ReplicaHome/ReplicaHomePage';
 
@@ -163,17 +163,24 @@ const AdminPageWrapper = () => {
     );
 };
 
-const App = () => {
+const TitleSync = () => {
+    const { config } = usePublicConfig();
     useEffect(() => {
-        document.title = SITE_NAME;
-    }, [SITE_NAME]);
+        document.title = config.siteName;
+    }, [config.siteName]);
+    return null;
+};
 
+const App = () => {
     return (
         <BrowserRouter>
             <AuthProvider>
-                <SearchProvider>
-                    <AppContent />
-                </SearchProvider>
+                <PublicConfigProvider>
+                    <SearchProvider>
+                        <TitleSync />
+                        <AppContent />
+                    </SearchProvider>
+                </PublicConfigProvider>
             </AuthProvider>
         </BrowserRouter>
     );

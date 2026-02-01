@@ -1,17 +1,18 @@
 
 import React from 'react';
 import { CheckCircle } from 'lucide-react';
-import { SITE_NAME } from '../branding';
+import { usePublicConfig } from '../contexts/PublicConfigContext';
 
 type ViewState = 'landing' | 'results' | 'login' | 'pricing' | 'api' | 'monitoring';
 
 export const PricingPage = () => {
+    const { config } = usePublicConfig();
     return (
         <div className="min-h-screen bg-[#fafafa]">
              <div className="max-w-7xl mx-auto px-6 py-16">
                  <div className="text-center mb-16 space-y-4">
                      <h1 className="text-4xl font-bold text-gray-900">解锁完整的 GEO 洞察力</h1>
-                     <p className="text-gray-500 max-w-2xl mx-auto">选择最适合您的计划。无论您是独立开发者还是企业团队，{SITE_NAME} 都能为您提供最精准的 AI 搜索引擎优化数据。</p>
+                     <p className="text-gray-500 max-w-2xl mx-auto">选择最适合您的计划。无论您是独立开发者还是企业团队，{config.siteName} 都能为您提供最精准的 AI 搜索引擎优化数据。</p>
                  </div>
 
                  <div className="grid grid-cols-1 md:grid-cols-3 gap-8 max-w-6xl mx-auto">

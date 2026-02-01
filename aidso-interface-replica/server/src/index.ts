@@ -1480,6 +1480,31 @@ app.get('/api/admin/config', requireAdmin(), async (req, res) => {
     }
 });
 
+// Public config (safe subset) for frontend bootstrapping (homepage, branding, etc.)
+app.get('/api/config/public', (req, res) => {
+  try {
+    const config = readAppConfig();
+    const siteNameRaw = (config && config.system && (config.system as any).siteName) as any;
+    const siteName = typeof siteNameRaw === 'string' ? siteNameRaw.trim() : '';
+
+    const models = config?.newApi?.models;
+    const enabledModels =
+      models && typeof models === 'object'
+        ? Object.entries(models as any)
+            .filter(([, cfg]) => cfg && (cfg as any).enabled === true)
+            .map(([key]) => key)
+        : [];
+
+    res.json({
+      siteName: siteName || null,
+      enabledModels,
+    });
+  } catch (err) {
+    console.error('Failed to load public config', err);
+    res.status(500).json({ error: 'Failed to load public config' });
+  }
+});
+
 // 诊断端点：检查配置文件状态
 app.get('/api/admin/config/diagnose', requireAdmin(), (req, res) => {
     try {
@@ -1576,19 +1601,26 @@ app.post('/api/admin/config', requireAdmin(), async (req, res) => {
     }
 });
 
-app.patch('/api/admin/config/system', requireAdmin(), (req, res) => {
+app.patch('/api/admin/config/system', requireAdmin(), async (req, res) => {
   try {
-    const config = readAppConfig();
+    const config = await readAppConfigFromDB();
     const patch = req.body || {};
+
+    const siteNameRaw = patch?.siteName;
+    const siteName =
+      typeof siteNameRaw === 'string'
+        ? siteNameRaw.trim().slice(0, 50)
+        : undefined;
 
     const nextSystem = {
       ...(config.system || {}),
       ...(typeof patch.maintenanceMode === 'boolean' ? { maintenanceMode: patch.maintenanceMode } : {}),
       ...(typeof patch.signupEnabled === 'boolean' ? { signupEnabled: patch.signupEnabled } : {}),
+      ...(typeof siteName === 'string' ? { siteName } : {}),
     };
 
     const nextConfig = { ...config, system: nextSystem };
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(nextConfig, null, 2));
+    await saveAppConfigToDB(nextConfig);
     res.json({ success: true, system: nextSystem });
   } catch (error) {
     console.error('Failed to patch system config', error);

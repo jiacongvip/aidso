@@ -6,15 +6,31 @@ import { useSearch } from '../../../contexts/SearchContext';
 import { useToast } from '../../../contexts/ToastContext';
 import { useTasks } from '../../../contexts/TaskContext';
 import { useAuth } from '../../../contexts/AuthContext';
-import { SITE_NAME } from '../../../branding';
+import { usePublicConfig } from '../../../contexts/PublicConfigContext';
 
 const PENDING_SEARCH_KEY = 'qingkuaisou_pending_search';
-const ALLOWED_MODEL_KEYS = new Set(['豆包', 'DeepSeek', '腾讯元宝', '文心', '通义千问', 'Kimi', '百度AI']);
+const FALLBACK_ENABLED_MODEL_KEYS = new Set(['豆包', 'DeepSeek', '腾讯元宝', '文心', '通义千问', 'Kimi', '百度AI']);
 
 function normalizeModelKey(name: string) {
   // Backend uses "通义千问" as the model key.
   if (name === '千问') return '通义千问';
   return name;
+}
+
+function platformIdToModelKey(id: string) {
+  const map: Record<string, string> = {
+    'doubao-web': '豆包',
+    'doubao-app': '豆包',
+    'deepseek-web': 'DeepSeek',
+    'deepseek-app': 'DeepSeek',
+    'yuanbao-web': '腾讯元宝',
+    'qianwen-web': '通义千问',
+    'baidu-web': '百度AI',
+    'wenxin-web': '文心',
+    'kimi-web': 'Kimi',
+    'douyin-web': 'AI抖音',
+  };
+  return map[id] || '';
 }
 
 function modelKeysToPlatformIds(modelKeys: string[]) {
@@ -26,6 +42,7 @@ function modelKeysToPlatformIds(modelKeys: string[]) {
     '百度AI': ['baidu-web'],
     '文心': ['wenxin-web'],
     'Kimi': ['kimi-web'],
+    'AI抖音': ['douyin-web'],
   };
 
   const ids = modelKeys.flatMap((k) => map[normalizeModelKey(k)] || []);
@@ -40,6 +57,20 @@ const SearchCard: React.FC = () => {
   const { addToast } = useToast();
   const { addTask } = useTasks();
   const { query: savedQuery, selectedBrands: savedSelectedBrands, searchType: savedSearchType, setQuery, setSelectedBrands, setSearchType } = useSearch();
+  const { config: publicConfig } = usePublicConfig();
+
+  const enabledModelKeys = useMemo(() => {
+    const keys = Array.isArray(publicConfig.enabledModels)
+      ? publicConfig.enabledModels.map(normalizeModelKey).filter(Boolean)
+      : [];
+    return keys.length > 0 ? Array.from(new Set(keys)) : Array.from(FALLBACK_ENABLED_MODEL_KEYS);
+  }, [publicConfig.enabledModels]);
+
+  const enabledModelKeySet = useMemo(() => new Set(enabledModelKeys), [enabledModelKeys]);
+
+  const platforms = useMemo(() => {
+    return PLATFORMS.filter((p) => enabledModelKeySet.has(platformIdToModelKey(p.id)));
+  }, [enabledModelKeySet]);
 
   const [activeTab, setActiveTab] = useState<'search' | 'diagnosis'>('search');
   const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>(() => {
@@ -53,12 +84,13 @@ const SearchCard: React.FC = () => {
   const [input, setInput] = useState(savedQuery || '');
 
   const selectedModels = useMemo(() => {
-    const names = selectedPlatforms
-      .map((id) => PLATFORMS.find((p) => p.id === id)?.name)
-      .filter(Boolean) as string[];
-    const unique = Array.from(new Set(names.map(normalizeModelKey)));
-    return unique.filter((k) => ALLOWED_MODEL_KEYS.has(k));
-  }, [selectedPlatforms]);
+    const keys = selectedPlatforms
+      .map((id) => platformIdToModelKey(id))
+      .filter(Boolean)
+      .map(normalizeModelKey);
+    const unique = Array.from(new Set(keys));
+    return unique.filter((k) => enabledModelKeySet.has(k));
+  }, [enabledModelKeySet, selectedPlatforms]);
 
   const executeSearch = async (params: { keyword: string; searchType: 'quick' | 'deep'; models: string[] }) => {
     setQuery(params.keyword);
@@ -104,21 +136,27 @@ const SearchCard: React.FC = () => {
     });
   };
 
+  // If enabled platforms change (admin config), prune invalid selections.
+  useEffect(() => {
+    const allowedIds = new Set(platforms.map((p) => p.id));
+    setSelectedPlatforms((prev) => prev.filter((id) => allowedIds.has(id)));
+  }, [platforms]);
+
   // Sync Select All state
   useEffect(() => {
-    if (selectedPlatforms.length === PLATFORMS.length) {
+    if (platforms.length > 0 && selectedPlatforms.length === platforms.length) {
       setSelectAll(true);
     } else {
       setSelectAll(false);
     }
-  }, [selectedPlatforms]);
+  }, [platforms.length, selectedPlatforms]);
 
   // Handle Select All click
   const handleSelectAll = () => {
     if (selectAll) {
       setSelectedPlatforms([]);
     } else {
-      setSelectedPlatforms(PLATFORMS.map(p => p.id));
+      setSelectedPlatforms(platforms.map(p => p.id));
     }
     setSelectAll(!selectAll);
   };
@@ -226,7 +264,7 @@ const SearchCard: React.FC = () => {
 
       {/* Platform Grid */}
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2 mb-6">
-        {PLATFORMS.map((platform) => {
+        {platforms.map((platform) => {
           const isSelected = selectedPlatforms.includes(platform.id);
           return (
             <div 
@@ -259,7 +297,7 @@ const SearchCard: React.FC = () => {
           className="bg-gradient-to-r from-[#6366f1] to-[#a855f7] text-white px-8 py-2.5 rounded-lg font-medium shadow-lg shadow-purple-200 hover:shadow-purple-300 transform hover:-translate-y-0.5 transition-all text-sm"
           onClick={handleSubmit}
         >
-          {SITE_NAME}一下
+          {publicConfig.siteName}一下
         </button>
       </div>
       

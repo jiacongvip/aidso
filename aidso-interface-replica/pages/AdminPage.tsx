@@ -13,7 +13,7 @@ import { PermissionSettings } from '../components/PermissionSettings';
 import { AddUserDrawer } from '../components/AddUserDrawer';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { apiFetch } from '../services/api';
-import { SITE_NAME } from '../branding';
+import { usePublicConfig } from '../contexts/PublicConfigContext';
 
 type AdminTab =
     | 'overview'
@@ -987,6 +987,7 @@ const ApiLogDetailModal = ({ log, onClose }: { log: any, onClose: () => void }) 
 
 export const AdminPage = ({ onExit }: { onExit: () => void }) => {
     const [activeTab, setActiveTab] = useState<AdminTab>('overview');
+    const { config: publicConfig, refresh: refreshPublicConfig } = usePublicConfig();
     const [users, setUsers] = useState<any[]>([]);
     const [usersTotal, setUsersTotal] = useState(0);
     const [usersLoading, setUsersLoading] = useState(false);
@@ -1095,6 +1096,7 @@ export const AdminPage = ({ onExit }: { onExit: () => void }) => {
     // Settings State
     const [maintenanceMode, setMaintenanceMode] = useState(false);
     const [signupEnabled, setSignupEnabled] = useState(true);
+    const [siteName, setSiteName] = useState(publicConfig.siteName);
 
     useEffect(() => {
         apiFetch('/api/admin/config')
@@ -1102,17 +1104,20 @@ export const AdminPage = ({ onExit }: { onExit: () => void }) => {
             .then(cfg => {
                 setMaintenanceMode(!!cfg?.system?.maintenanceMode);
                 setSignupEnabled(cfg?.system?.signupEnabled !== false);
+                const sn = typeof cfg?.system?.siteName === 'string' ? cfg.system.siteName.trim() : '';
+                setSiteName(sn || publicConfig.siteName);
             })
             .catch(() => {});
     }, []);
 
-    const patchSystemConfig = async (patch: { maintenanceMode?: boolean, signupEnabled?: boolean }) => {
+    const patchSystemConfig = async (patch: { maintenanceMode?: boolean, signupEnabled?: boolean, siteName?: string }) => {
         try {
-            await apiFetch('/api/admin/config/system', {
+            const res = await apiFetch('/api/admin/config/system', {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(patch)
             });
+            if (res.ok) refreshPublicConfig();
         } catch (err) {
             console.error('Failed to patch system config', err);
         }
@@ -3329,7 +3334,17 @@ export const AdminPage = ({ onExit }: { onExit: () => void }) => {
                                 <div className="grid grid-cols-2 gap-6">
                                     <div>
                                         <label className="block text-xs font-bold text-gray-700 mb-2">站点名称</label>
-                                        <input type="text" defaultValue={SITE_NAME} className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:border-brand-purple outline-none" />
+                                        <input
+                                            type="text"
+                                            value={siteName}
+                                            onChange={(e) => setSiteName(e.target.value)}
+                                            onBlur={() => patchSystemConfig({ siteName })}
+                                            onKeyDown={(e) => {
+                                                if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                                            }}
+                                            className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:border-brand-purple outline-none"
+                                        />
+                                        <div className="text-[10px] text-gray-400 mt-1">修改后失焦自动保存</div>
                                     </div>
                                     <div>
                                         <label className="block text-xs font-bold text-gray-700 mb-2">管理员邮箱</label>
@@ -3415,7 +3430,7 @@ export const AdminPage = ({ onExit }: { onExit: () => void }) => {
             <div className="w-64 bg-gray-900 text-white flex flex-col fixed inset-y-0 left-0 z-50 shadow-xl">
                 <div className="h-16 flex items-center gap-3 px-6 border-b border-gray-800 bg-gray-900 z-10">
                     <div className="w-8 h-8 bg-brand-purple rounded-lg flex items-center justify-center text-white font-bold shadow-lg shadow-purple-900/50">A</div>
-                    <span className="font-bold text-lg tracking-tight">{SITE_NAME} 后台</span>
+                    <span className="font-bold text-lg tracking-tight">{publicConfig.siteName} 后台</span>
                 </div>
 
                 <div className="flex-1 py-6 space-y-1 px-3 overflow-y-auto scrollbar-hide">

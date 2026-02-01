@@ -3,13 +3,14 @@ import React, { useState } from 'react';
 import { Search, History, Clock, Trash2, Lock, Coins } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
-import { SITE_NAME } from '../branding';
+import { usePublicConfig } from '../contexts/PublicConfigContext';
 
 export const Navbar = ({ isLanding: propIsLanding }: { isLanding?: boolean }) => {
   const navigate = useNavigate();
   const location = useLocation();
   const isLanding = propIsLanding ?? (location.pathname === '/' || location.pathname === '/landing');
   const { checkPermission, user, logout } = useAuth();
+  const { config } = usePublicConfig();
   
   const [showHistory, setShowHistory] = useState(false);
   const [history, setHistory] = useState([
@@ -40,7 +41,7 @@ export const Navbar = ({ isLanding: propIsLanding }: { isLanding?: boolean }) =>
             <div className="w-8 h-8 bg-brand-purple rounded-lg flex items-center justify-center text-white shadow-md shadow-purple-200 group-hover:scale-105 transition-transform duration-200">
                 <Search size={18} strokeWidth={2.5} />
             </div>
-            <span className="text-gray-900 group-hover:text-brand-purple transition-colors duration-300">{SITE_NAME}</span>
+            <span className="text-gray-900 group-hover:text-brand-purple transition-colors duration-300">{config.siteName}</span>
             <div className="flex items-center text-[10px] ml-1 border border-brand-purple rounded-full overflow-hidden shadow-sm">
                 <span className="px-1.5 py-0.5 text-brand-purple font-bold bg-purple-50">AI</span>
                 <span className="px-1.5 py-0.5 bg-brand-purple text-white font-bold">GEO</span>
