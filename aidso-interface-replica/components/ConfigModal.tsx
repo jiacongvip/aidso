@@ -3,6 +3,7 @@ import { X, FileText, Link as LinkIcon, Check, Tag, Target, Users, AlertCircle, 
 import { MONITOR_PLATFORMS } from '../data';
 import { apiErrorToMessage, apiJson } from '../services/api';
 import { estimateCostUnits, getBillingPricing, type BillingPricing } from '../services/billing';
+import { usePublicConfig } from '../contexts/PublicConfigContext';
 
 export type MonitoringProject = {
   id?: string;
@@ -48,6 +49,7 @@ export const ConfigModal = ({
   project?: MonitoringProject | null;
   onSaved?: (project: MonitoringProject) => void;
 }) => {
+  const { config: publicConfig } = usePublicConfig();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [pricing, setPricing] = useState<BillingPricing | null>(null);
@@ -62,6 +64,35 @@ export const ConfigModal = ({
   const [intervalMinutes, setIntervalMinutes] = useState(1440);
   const [searchType, setSearchType] = useState<'quick' | 'deep'>('quick');
 
+  const modelSets = useMemo(() => {
+    const states = Array.isArray(publicConfig.models) ? publicConfig.models : [];
+    if (states.length > 0) {
+      const enabled = new Set(states.filter((m) => m && m.enabled !== false).map((m) => m.key));
+      const ready = new Set(states.filter((m) => m && m.enabled !== false && m.ready === true).map((m) => m.key));
+      return { enabled, ready };
+    }
+    const keys = Array.isArray(publicConfig.enabledModels)
+      ? publicConfig.enabledModels.filter((x) => typeof x === 'string')
+      : [];
+    const enabled = new Set(keys);
+    const ready = new Set(keys);
+    return { enabled, ready };
+  }, [publicConfig.enabledModels, publicConfig.models]);
+
+  const availablePlatforms = useMemo(() => {
+    if (modelSets.enabled.size === 0) return [];
+    return MONITOR_PLATFORMS.filter((p) => modelSets.enabled.has(platformNameToModelKey(p.name)));
+  }, [modelSets.enabled]);
+
+  const defaultSelectedModels = useMemo(() => {
+    if (modelSets.ready.size === 0) return [];
+    // pick common models first if available
+    const preferred = ['豆包', 'DeepSeek', '腾讯元宝', '文心', '通义千问', 'Kimi', '百度AI'];
+    const picks = preferred.filter((k) => modelSets.ready.has(k));
+    const rest = Array.from(modelSets.ready).filter((k) => !picks.includes(k));
+    return [...picks, ...rest].slice(0, 3);
+  }, [modelSets.ready]);
+
   useEffect(() => {
     if (!isOpen) return;
     setError('');
@@ -75,11 +106,18 @@ export const ConfigModal = ({
     );
     setCompetitorsText((Array.isArray(p?.competitors) ? p!.competitors : ['有赞', '微盟']).join(', '));
     setNegativeText((Array.isArray(p?.negativeKeywords) ? p!.negativeKeywords : ['招聘', '兼职', '实习']).join(', '));
-    setSelectedModels(Array.isArray(p?.selectedModels) && p!.selectedModels.length > 0 ? p!.selectedModels : ['豆包', 'DeepSeek', '腾讯元宝']);
+    setSelectedModels(Array.isArray(p?.selectedModels) && p!.selectedModels.length > 0 ? p!.selectedModels : defaultSelectedModels);
     setIntervalMinutes(typeof p?.intervalMinutes === 'number' ? p!.intervalMinutes : 1440);
     setSearchType(p?.searchType === 'deep' ? 'deep' : 'quick');
     setKeywordInput('');
-  }, [isOpen, project?.id]);
+  }, [defaultSelectedModels, isOpen, project?.id]);
+
+  // Keep selection only in ready models.
+  useEffect(() => {
+    if (!isOpen) return;
+    if (modelSets.ready.size === 0) return;
+    setSelectedModels((prev) => prev.filter((k) => modelSets.ready.has(k)));
+  }, [isOpen, modelSets.ready]);
 
   const costPreview = useMemo(() => {
     const perTask = estimateCostUnits({ models: selectedModels, searchType, pricing });
@@ -91,6 +129,7 @@ export const ConfigModal = ({
 
   const togglePlatform = (platformName: string) => {
     const modelKey = platformNameToModelKey(platformName);
+    if (modelKey && !modelSets.ready.has(modelKey)) return;
     setSelectedModels((prev) => {
       const has = prev.includes(modelKey);
       const next = has ? prev.filter((m) => m !== modelKey) : [...prev, modelKey];
@@ -328,7 +367,17 @@ export const ConfigModal = ({
               <h3 className="text-sm font-bold text-gray-900 border-l-4 border-brand-purple pl-3">监测平台范围</h3>
               <div
                 className="flex items-center gap-2 cursor-pointer group"
-                onClick={() => setSelectedModels(Array.from(new Set(MONITOR_PLATFORMS.map((p) => platformNameToModelKey(p.name)))).slice(0, 8))}
+                onClick={() =>
+                  setSelectedModels(
+                    Array.from(
+                      new Set(
+                        availablePlatforms
+                          .map((p) => platformNameToModelKey(p.name))
+                          .filter((k) => k && modelSets.ready.has(k))
+                      )
+                    ).slice(0, 8)
+                  )
+                }
               >
                 <div className="w-4 h-4 bg-brand-purple rounded flex items-center justify-center text-white">
                   <Check size={12} strokeWidth={3} />
@@ -336,15 +385,21 @@ export const ConfigModal = ({
                 <span className="text-xs font-bold text-brand-purple">全选主流引擎</span>
               </div>
             </div>
+            {modelSets.enabled.size === 0 && (
+              <div className="text-xs text-gray-400">暂无可用模型，请管理员在后台启用并配置模型源</div>
+            )}
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-              {MONITOR_PLATFORMS.map((platform, idx) => {
+              {availablePlatforms.map((platform, idx) => {
                 const modelKey = platformNameToModelKey(platform.name);
                 const enabled = selectedModels.includes(modelKey);
+                const ready = modelKey ? modelSets.ready.has(modelKey) : false;
                 return (
                   <div
                     key={idx}
                     onClick={() => togglePlatform(platform.name)}
-                    className="flex items-center gap-2 border border-gray-200 rounded-lg p-2 hover:border-brand-purple cursor-pointer transition-all bg-white relative overflow-hidden group"
+                    className={`flex items-center gap-2 border border-gray-200 rounded-lg p-2 transition-all bg-white relative overflow-hidden group ${
+                      ready ? 'hover:border-brand-purple cursor-pointer' : 'opacity-50 cursor-not-allowed'
+                    }`}
                   >
                     <div
                       className={`w-4 h-4 rounded border flex items-center justify-center flex-shrink-0 transition-colors ${
@@ -354,7 +409,10 @@ export const ConfigModal = ({
                       {enabled && <Check size={10} strokeWidth={3} />}
                     </div>
                     <img src={platform.icon} className="w-5 h-5 rounded-full" alt={platform.name} />
-                    <span className="text-xs font-medium text-gray-700 whitespace-nowrap">{platform.name}</span>
+                    <div className="flex flex-col">
+                      <span className="text-xs font-medium text-gray-700 whitespace-nowrap">{platform.name}</span>
+                      {!ready && <span className="text-[10px] text-gray-400">未配置</span>}
+                    </div>
                   </div>
                 );
               })}

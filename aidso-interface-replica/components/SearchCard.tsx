@@ -21,16 +21,31 @@ interface SearchCardProps {
 export const SearchCard = ({ searchType, setSearchType, selectedBrands, toggleBrand, onSearch, isSearching, query, setQuery, estimatedCostUnits, placeholder, className }: SearchCardProps) => {
     const { config: publicConfig } = usePublicConfig();
 
-    const brands = useMemo(() => {
-        const enabled = Array.isArray(publicConfig.enabledModels) && publicConfig.enabledModels.length > 0
-            ? new Set(publicConfig.enabledModels.filter((x) => typeof x === 'string'))
-            : null;
+    const modelSets = useMemo(() => {
+        const states = Array.isArray(publicConfig.models) ? publicConfig.models : [];
+        if (states.length > 0) {
+            const enabled = new Set(states.filter((m) => m && m.enabled !== false).map((m) => m.key));
+            const ready = new Set(states.filter((m) => m && m.enabled !== false && m.ready === true).map((m) => m.key));
+            return { enabled, ready };
+        }
 
-        const base = enabled ? BRANDS.filter((b) => enabled.has(b.name)) : BRANDS;
+        const keys = Array.isArray(publicConfig.enabledModels)
+            ? publicConfig.enabledModels.filter((x) => typeof x === 'string')
+            : [];
+        const enabled = new Set(keys);
+        const ready = new Set(keys);
+        return { enabled, ready };
+    }, [publicConfig.enabledModels, publicConfig.models]);
+
+    const brands = useMemo(() => {
+        const enabled = modelSets.enabled.size > 0 ? modelSets.enabled : null;
+
+        const base = enabled ? BRANDS.filter((b) => enabled.has(b.name)) : [];
         if (!enabled) return base;
 
+        const enabledKeys = Array.from(enabled);
         const known = new Set(base.map((b) => b.name));
-        const extras = publicConfig.enabledModels.filter((name) => typeof name === 'string' && !known.has(name));
+        const extras = enabledKeys.filter((name) => typeof name === 'string' && !known.has(name));
         const extraBrands = extras.map((name) => ({
             name,
             color: 'bg-gray-500',
@@ -39,7 +54,15 @@ export const SearchCard = ({ searchType, setSearchType, selectedBrands, toggleBr
             latency: '',
         }));
         return [...base, ...extraBrands];
-    }, [publicConfig.enabledModels]);
+    }, [modelSets.enabled]);
+
+    const disabledSet = useMemo(() => {
+        // Enabled but not ready (missing baseUrl/apiKey/model).
+        const enabled = modelSets.enabled;
+        if (enabled.size === 0) return new Set<string>();
+        const ready = modelSets.ready;
+        return new Set(Array.from(enabled).filter((k) => !ready.has(k)));
+    }, [modelSets.enabled, modelSets.ready]);
 
     return (
     <div className={`w-full max-w-5xl mx-auto bg-white rounded-2xl shadow-card ring-1 ring-black/5 p-8 mt-8 relative z-10 transition-shadow hover:shadow-lg duration-500 ${className || ''}`}>
@@ -86,11 +109,17 @@ export const SearchCard = ({ searchType, setSearchType, selectedBrands, toggleBr
             <div className="flex flex-wrap gap-5">
                 {brands.map((brand) => {
                     const isSelected = selectedBrands.includes(brand.name);
+                    const isDisabled = disabledSet.has(brand.name);
                     return (
                         <div 
                             key={brand.name} 
-                            onClick={() => toggleBrand(brand.name)}
-                            className="flex items-center gap-2 cursor-pointer select-none group/item active:scale-95 transition-transform duration-100"
+                            onClick={() => {
+                                if (isDisabled) return;
+                                toggleBrand(brand.name);
+                            }}
+                            className={`flex items-center gap-2 select-none group/item transition-transform duration-100 ${
+                                isDisabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer active:scale-95'
+                            }`}
                         >
                             {/* Enhanced Checkbox state */}
                             <div className={`relative w-4 h-4 rounded flex items-center justify-center text-white text-[10px] shadow-sm ring-1 transition-all duration-200 ${isSelected ? 'bg-brand-purple ring-purple-100 shadow-purple-200' : 'bg-white ring-gray-200'}`}>
@@ -104,6 +133,7 @@ export const SearchCard = ({ searchType, setSearchType, selectedBrands, toggleBr
                             <span className={`text-sm font-medium transition-colors duration-200 group-hover/item:text-brand-purple ${isSelected ? 'text-gray-800' : 'text-gray-400'}`}>
                                 {brand.name}
                             </span>
+                            {isDisabled && <span className="text-[10px] text-gray-400">未配置</span>}
                         </div>
                     );
                 })}

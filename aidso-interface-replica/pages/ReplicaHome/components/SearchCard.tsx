@@ -57,20 +57,44 @@ const SearchCard: React.FC = () => {
   const { addToast } = useToast();
   const { addTask } = useTasks();
   const { query: savedQuery, selectedBrands: savedSelectedBrands, searchType: savedSearchType, setQuery, setSelectedBrands, setSearchType } = useSearch();
-  const { config: publicConfig } = usePublicConfig();
+  const { config: publicConfig, error: publicConfigError } = usePublicConfig();
 
-  const enabledModelKeys = useMemo(() => {
+  const enabledModelStates = useMemo(() => {
+    const fromStates = Array.isArray(publicConfig.models) ? publicConfig.models : [];
+    if (fromStates.length > 0) return fromStates;
+
     const keys = Array.isArray(publicConfig.enabledModels)
       ? publicConfig.enabledModels.map(normalizeModelKey).filter(Boolean)
       : [];
-    return keys.length > 0 ? Array.from(new Set(keys)) : Array.from(FALLBACK_ENABLED_MODEL_KEYS);
-  }, [publicConfig.enabledModels]);
+    if (keys.length > 0) {
+      return Array.from(new Set(keys)).map((key) => ({ key, enabled: true, ready: true, missing: [] as string[] }));
+    }
 
-  const enabledModelKeySet = useMemo(() => new Set(enabledModelKeys), [enabledModelKeys]);
+    // If config cannot be loaded, fall back to a safe demo list to keep UI usable.
+    if (publicConfigError) {
+      return Array.from(FALLBACK_ENABLED_MODEL_KEYS).map((key) => ({ key, enabled: true, ready: true, missing: [] as string[] }));
+    }
+
+    return [];
+  }, [publicConfig.enabledModels, publicConfig.models, publicConfigError]);
+
+  const enabledModelKeySet = useMemo(
+    () => new Set(enabledModelStates.filter((m) => m && m.enabled !== false).map((m) => normalizeModelKey(m.key))),
+    [enabledModelStates]
+  );
+
+  const readyModelKeySet = useMemo(
+    () => new Set(enabledModelStates.filter((m) => m && m.enabled !== false && m.ready === true).map((m) => normalizeModelKey(m.key))),
+    [enabledModelStates]
+  );
 
   const platforms = useMemo(() => {
-    return PLATFORMS.filter((p) => enabledModelKeySet.has(platformIdToModelKey(p.id)));
+    return PLATFORMS.filter((p) => enabledModelKeySet.has(normalizeModelKey(platformIdToModelKey(p.id))));
   }, [enabledModelKeySet]);
+
+  const readyPlatforms = useMemo(() => {
+    return platforms.filter((p) => readyModelKeySet.has(normalizeModelKey(platformIdToModelKey(p.id))));
+  }, [platforms, readyModelKeySet]);
 
   const [activeTab, setActiveTab] = useState<'search' | 'diagnosis'>('search');
   const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>(() => {
@@ -89,8 +113,8 @@ const SearchCard: React.FC = () => {
       .filter(Boolean)
       .map(normalizeModelKey);
     const unique = Array.from(new Set(keys));
-    return unique.filter((k) => enabledModelKeySet.has(k));
-  }, [enabledModelKeySet, selectedPlatforms]);
+    return unique.filter((k) => readyModelKeySet.has(k));
+  }, [readyModelKeySet, selectedPlatforms]);
 
   const executeSearch = async (params: { keyword: string; searchType: 'quick' | 'deep'; models: string[] }) => {
     setQuery(params.keyword);
@@ -128,6 +152,8 @@ const SearchCard: React.FC = () => {
 
   // Toggle individual platform
   const togglePlatform = (id: string) => {
+    const modelKey = normalizeModelKey(platformIdToModelKey(id));
+    if (!modelKey || !readyModelKeySet.has(modelKey)) return;
     setSelectedPlatforms(prev => {
       const newSelection = prev.includes(id) 
         ? prev.filter(p => p !== id)
@@ -138,25 +164,26 @@ const SearchCard: React.FC = () => {
 
   // If enabled platforms change (admin config), prune invalid selections.
   useEffect(() => {
-    const allowedIds = new Set(platforms.map((p) => p.id));
+    const allowedIds = new Set(readyPlatforms.map((p) => p.id));
     setSelectedPlatforms((prev) => prev.filter((id) => allowedIds.has(id)));
-  }, [platforms]);
+  }, [readyPlatforms]);
 
   // Sync Select All state
   useEffect(() => {
-    if (platforms.length > 0 && selectedPlatforms.length === platforms.length) {
+    if (readyPlatforms.length > 0 && selectedPlatforms.length === readyPlatforms.length) {
       setSelectAll(true);
     } else {
       setSelectAll(false);
     }
-  }, [platforms.length, selectedPlatforms]);
+  }, [readyPlatforms.length, selectedPlatforms]);
 
   // Handle Select All click
   const handleSelectAll = () => {
+    if (readyPlatforms.length === 0) return;
     if (selectAll) {
       setSelectedPlatforms([]);
     } else {
-      setSelectedPlatforms(platforms.map(p => p.id));
+      setSelectedPlatforms(readyPlatforms.map(p => p.id));
     }
     setSelectAll(!selectAll);
   };
@@ -172,8 +199,12 @@ const SearchCard: React.FC = () => {
       addToast('请输入搜索内容', 'info');
       return;
     }
+    if (enabledModelKeySet.size === 0) {
+      addToast('暂无可用模型，请管理员在后台启用模型源', 'info');
+      return;
+    }
     if (selectedModels.length === 0) {
-      addToast('请至少选择一个已支持的AI模型', 'info');
+      addToast('请至少选择一个已配置的AI模型', 'info');
       return;
     }
 
@@ -266,13 +297,17 @@ const SearchCard: React.FC = () => {
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2 mb-6">
         {platforms.map((platform) => {
           const isSelected = selectedPlatforms.includes(platform.id);
+          const modelKey = normalizeModelKey(platformIdToModelKey(platform.id));
+          const isReady = modelKey ? readyModelKeySet.has(modelKey) : false;
           return (
             <div 
               key={platform.id}
               onClick={() => togglePlatform(platform.id)}
               className={`
-                flex items-center gap-2 p-2 rounded-lg cursor-pointer border transition-all select-none
-                ${isSelected ? 'bg-purple-50 border-purple-200' : 'bg-white border-gray-100 hover:bg-gray-50'}
+                flex items-center gap-2 p-2 rounded-lg border transition-all select-none relative
+                ${isReady ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'}
+                ${isSelected ? 'bg-purple-50 border-purple-200' : 'bg-white border-gray-100'}
+                ${isReady ? 'hover:bg-gray-50' : ''}
               `}
             >
               <div className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] text-white font-bold shrink-0 ${isSelected ? 'bg-purple-600' : 'bg-gray-300'}`}>
@@ -285,6 +320,7 @@ const SearchCard: React.FC = () => {
                  <span className="text-[10px] font-medium text-gray-700 whitespace-nowrap">
                    {platform.name} · {platform.type === 'Web' ? '网页版' : '手机版'}
                  </span>
+                 {!isReady && <span className="text-[9px] text-gray-400">未配置</span>}
               </div>
             </div>
           );

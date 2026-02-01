@@ -1488,16 +1488,37 @@ app.get('/api/config/public', (req, res) => {
     const siteName = typeof siteNameRaw === 'string' ? siteNameRaw.trim() : '';
 
     const models = config?.newApi?.models;
-    const enabledModels =
+    const enabledModelsRaw =
       models && typeof models === 'object'
         ? Object.entries(models as any)
             .filter(([, cfg]) => cfg && (cfg as any).enabled === true)
             .map(([key]) => key)
         : [];
 
+    const legacy = config?.newApi;
+    const getEffectiveField = (cfg: any, field: 'baseUrl' | 'apiKey' | 'model') => {
+      const local = typeof cfg?.[field] === 'string' ? cfg[field].trim() : '';
+      if (local) return local;
+      const global = typeof legacy?.[field] === 'string' ? legacy[field].trim() : '';
+      return global || '';
+    };
+
+    const modelStates = enabledModelsRaw.map((key) => {
+      const cfg = (models as any)?.[key];
+      const baseUrl = getEffectiveField(cfg, 'baseUrl');
+      const apiKey = getEffectiveField(cfg, 'apiKey');
+      const model = getEffectiveField(cfg, 'model');
+      const missing: string[] = [];
+      if (!baseUrl) missing.push('baseUrl');
+      if (!apiKey) missing.push('apiKey');
+      if (!model) missing.push('model');
+      return { key, enabled: true, ready: missing.length === 0, missing };
+    });
+
     res.json({
       siteName: siteName || null,
-      enabledModels,
+      enabledModels: enabledModelsRaw,
+      models: modelStates,
     });
   } catch (err) {
     console.error('Failed to load public config', err);

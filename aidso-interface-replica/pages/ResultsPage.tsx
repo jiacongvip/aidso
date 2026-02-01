@@ -9,6 +9,7 @@ import { BrandKeywordModal } from '../components/BrandKeywordModal';
 import { BRANDS, PLATFORM_DATA } from '../data';
 import { useTasks } from '../contexts/TaskContext';
 import { useAuth } from '../contexts/AuthContext';
+import { usePublicConfig } from '../contexts/PublicConfigContext';
 import { estimateCostUnits, getBillingPricing, type BillingPricing } from '../services/billing';
 import { apiJson } from '../services/api';
 import { 
@@ -212,10 +213,11 @@ export const ResultsPage = () => {
     const navigate = useNavigate();
     const { 
         query, setQuery, searchType, setSearchType, 
-        selectedBrands, toggleBrand, isSearching, setIsSearching, 
+        selectedBrands, setSelectedBrands, toggleBrand, isSearching, setIsSearching, 
     } = useSearch();
     const { addToast } = useToast();
     const { user } = useAuth();
+    const { config: publicConfig } = usePublicConfig();
     const { tasks, activeTaskId, addTask, deleteTask } = useTasks();
 
     const activeTask = tasks.find(t => t.id === activeTaskId) || tasks[0] || null;
@@ -237,6 +239,14 @@ export const ResultsPage = () => {
     useEffect(() => {
         getBillingPricing().then(setPricing);
     }, []);
+
+    // If admin changes enabled/ready models, keep selection in sync.
+    useEffect(() => {
+        const states = Array.isArray(publicConfig.models) ? publicConfig.models : [];
+        if (states.length === 0) return;
+        const ready = new Set(states.filter((m) => m && m.enabled !== false && m.ready === true).map((m) => m.key));
+        setSelectedBrands((prev) => prev.filter((k) => ready.has(k)));
+    }, [publicConfig.models, setSelectedBrands]);
 
     useEffect(() => {
         const first = activeTask?.selectedModels?.[0];
@@ -311,6 +321,13 @@ export const ResultsPage = () => {
         PLATFORM_DATA[activeTask?.selectedModels?.[0] || '豆包'] ||
         PLATFORM_DATA['豆包'];
 
+    const modalPlatforms = (() => {
+        if (Array.isArray(activeTask?.selectedModels) && activeTask!.selectedModels.length > 0) return activeTask!.selectedModels;
+        if (Array.isArray(publicConfig.models) && publicConfig.models.length > 0) return publicConfig.models.map((m) => m.key);
+        if (Array.isArray(publicConfig.enabledModels) && publicConfig.enabledModels.length > 0) return publicConfig.enabledModels;
+        return BRANDS.map((b) => b.name);
+    })();
+
     return (
         <>
             <div className="flex-1 px-6 relative z-10 pb-20 pt-20">
@@ -373,10 +390,10 @@ export const ResultsPage = () => {
                      <div className="w-full h-full max-w-[1600px] flex gap-6">
                          
                          {/* Left Sidebar: Platforms */}
-                         <div className="w-[180px] flex flex-col gap-4 py-4 animate-slide-in-right" style={{animationDelay: '0.1s'}}>
-                             <div className="text-white/80 font-bold text-sm px-2">对话平台</div>
-                             <div className="space-y-3">
-                                 {(activeTask?.selectedModels?.length ? activeTask.selectedModels : BRANDS.map(b => b.name)).map((name) => {
+                             <div className="w-[180px] flex flex-col gap-4 py-4 animate-slide-in-right" style={{animationDelay: '0.1s'}}>
+                                 <div className="text-white/80 font-bold text-sm px-2">对话平台</div>
+                                 <div className="space-y-3">
+                                 {modalPlatforms.map((name) => {
                                      const brand = BRANDS.find((b) => b.name === name);
                                      const icon = brand?.icon || BRANDS[0]?.icon;
                                      return (
