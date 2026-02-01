@@ -4,6 +4,11 @@ import { Search, History, Clock, Trash2, Lock, Coins } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { usePublicConfig } from '../contexts/PublicConfigContext';
+import { useSearch } from '../contexts/SearchContext';
+import { useToast } from '../contexts/ToastContext';
+import { useTasks, type Task } from '../contexts/TaskContext';
+
+const PENDING_SEARCH_KEY = 'qingkuaisou_pending_search';
 
 export const Navbar = ({ isLanding: propIsLanding }: { isLanding?: boolean }) => {
   const navigate = useNavigate();
@@ -12,23 +17,66 @@ export const Navbar = ({ isLanding: propIsLanding }: { isLanding?: boolean }) =>
   const isLanding = propIsLanding ?? (location.pathname === '/landing');
   const { checkPermission, user, logout } = useAuth();
   const { config } = usePublicConfig();
+  const { addToast } = useToast();
+  const { addTask, tasks, restoreTask, deleteTask } = useTasks();
+  const { query, setQuery, searchType, setSearchType, selectedBrands, setSelectedBrands } = useSearch();
   
   const [showHistory, setShowHistory] = useState(false);
-  const [history, setHistory] = useState([
-    "常州小程序开发公司哪家好",
-    "DeepSeek V3 深度评测",
-    "SCRM 系统私有化部署价格",
-    "React 19 Server Components",
-    "如何优化 AI 搜索排名"
-  ]);
 
-  const handleDeleteItem = (e: React.MouseEvent, itemToDelete: string) => {
-    e.stopPropagation();
-    setHistory(history.filter(item => item !== itemToDelete));
+  const modelSets = React.useMemo(() => {
+    const states = Array.isArray(config.models) ? config.models : [];
+    if (states.length > 0) {
+      const enabled = new Set(states.filter((m) => m && m.enabled !== false).map((m) => m.key));
+      const ready = new Set(states.filter((m) => m && m.enabled !== false && m.ready === true).map((m) => m.key));
+      return { enabled, ready };
+    }
+    const keys = Array.isArray(config.enabledModels) ? config.enabledModels.filter((x) => typeof x === 'string') : [];
+    const enabled = new Set(keys);
+    const ready = new Set(keys);
+    return { enabled, ready };
+  }, [config.enabledModels, config.models]);
+
+  const canRunSearch = async () => {
+    const keyword = query.trim();
+    if (!keyword) {
+      addToast('请输入搜索内容', 'info');
+      return;
+    }
+
+    const models = (selectedBrands || []).filter((m) => modelSets.ready.has(m));
+    if (models.length === 0) {
+      addToast('请先选择至少 1 个已配置的AI模型', 'info');
+      navigate('/results');
+      return;
+    }
+
+    if (!user) {
+      sessionStorage.setItem(PENDING_SEARCH_KEY, JSON.stringify({ keyword, searchType, models }));
+      addToast('请先登录后执行任务', 'info');
+      navigate('/login');
+      return;
+    }
+
+    try {
+      await addTask({ keyword, searchType, models });
+      addToast('任务已创建，正在执行中...', 'success');
+      navigate('/results');
+    } catch (err: any) {
+      addToast(err?.message || '创建任务失败', 'error');
+    }
   };
 
-  const handleHistoryClick = (item: string) => {
+  const handleDeleteItem = (e: React.MouseEvent, taskId: string) => {
+    e.stopPropagation();
+    deleteTask(taskId);
+  };
+
+  const handleHistoryClick = (t: Task) => {
     setShowHistory(false);
+    setQuery(t.keyword || '');
+    setSearchType(t.searchType === 'deep' ? 'deep' : 'quick');
+    setSelectedBrands(Array.isArray(t.selectedModels) ? t.selectedModels : []);
+    restoreTask(t.id);
     navigate('/results');
   };
 
@@ -82,9 +130,20 @@ export const Navbar = ({ isLanding: propIsLanding }: { isLanding?: boolean }) =>
             {!isLanding && (
                 <div className="hidden lg:flex bg-gray-100/50 hover:bg-white border border-transparent hover:border-purple-200 rounded-full items-center px-4 py-1.5 w-72 transition-all duration-300 group focus-within:bg-white focus-within:border-purple-200 focus-within:shadow-md focus-within:ring-2 focus-within:ring-purple-50">
                     <span className="text-gray-400 text-xs mr-2 whitespace-nowrap group-focus-within:text-brand-purple transition-colors font-medium">AI问题</span>
-                    <input type="text" placeholder="向AI咨询的问题" className="bg-transparent border-none outline-none text-xs w-full text-gray-700 placeholder-gray-400" />
+                    <input
+                        type="text"
+                        placeholder="向AI咨询的问题"
+                        className="bg-transparent border-none outline-none text-xs w-full text-gray-700 placeholder-gray-400"
+                        value={query}
+                        onChange={(e) => setQuery(e.target.value)}
+                        onKeyDown={(e) => {
+                            if (e.key === 'Enter') canRunSearch();
+                        }}
+                    />
                     <div className="w-6 h-6 bg-brand-purple rounded-full flex items-center justify-center text-white ml-2 cursor-pointer hover:bg-brand-hover hover:scale-105 active:scale-95 transition-all shadow-sm">
-                        <Search size={12} />
+                        <button type="button" onClick={canRunSearch} title="搜索">
+                            <Search size={12} />
+                        </button>
                     </div>
                 </div>
             )}
@@ -106,32 +165,41 @@ export const Navbar = ({ isLanding: propIsLanding }: { isLanding?: boolean }) =>
                             <div className="flex items-center justify-between px-4 py-2 border-b border-gray-50 mb-1">
                                 <span className="text-xs font-bold text-gray-500">最近搜索</span>
                                 <span 
-                                    onClick={() => setHistory([])}
+                                    onClick={() => {
+                                        if (!user || tasks.length === 0) return;
+                                        if (!confirm('确定清空全部搜索记录吗？这将删除你的全部任务。')) return;
+                                        tasks.forEach((t) => deleteTask(t.id));
+                                    }}
                                     className="text-[10px] text-gray-400 cursor-pointer hover:text-red-500 transition-colors"
                                 >
                                     清空
                                 </span>
                             </div>
                             
-                            {history.length === 0 ? (
+                            {!user ? (
+                                <div className="px-4 py-8 text-center">
+                                    <Clock size={24} className="text-gray-200 mx-auto mb-2" />
+                                    <p className="text-xs text-gray-400">登录后查看搜索记录</p>
+                                </div>
+                            ) : tasks.length === 0 ? (
                                 <div className="px-4 py-8 text-center">
                                     <Clock size={24} className="text-gray-200 mx-auto mb-2" />
                                     <p className="text-xs text-gray-400">暂无搜索记录</p>
                                 </div>
                             ) : (
                                 <div className="max-h-[300px] overflow-y-auto custom-scrollbar">
-                                    {history.map((item, idx) => (
+                                    {tasks.slice(0, 15).map((t) => (
                                         <div 
-                                            key={idx}
-                                            onClick={() => handleHistoryClick(item)}
+                                            key={t.id}
+                                            onClick={() => handleHistoryClick(t)}
                                             className="flex items-center justify-between px-4 py-2.5 hover:bg-gray-50 cursor-pointer group transition-colors"
                                         >
                                             <div className="flex items-center gap-3 overflow-hidden">
                                                 <Clock size={14} className="text-gray-400 flex-shrink-0" />
-                                                <span className="text-sm text-gray-700 truncate">{item}</span>
+                                                <span className="text-sm text-gray-700 truncate">{t.keyword}</span>
                                             </div>
                                             <button 
-                                                onClick={(e) => handleDeleteItem(e, item)}
+                                                onClick={(e) => handleDeleteItem(e, t.id)}
                                                 className="p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-md opacity-0 group-hover:opacity-100 transition-all"
                                                 title="删除"
                                             >
