@@ -471,6 +471,99 @@ app.use('/api', async (req, res, next) => {
   }
 });
 
+// --- Task Queue + Rate Limit ---
+type PlanKey = 'FREE' | 'PRO' | 'ENTERPRISE';
+
+const TASK_CREATE_RATE_WINDOW_MS = 60 * 1000;
+const TASK_CREATE_RPM_DEFAULT: Record<PlanKey, number> = {
+  FREE: 6,
+  PRO: 30,
+  ENTERPRISE: 120,
+};
+
+const taskCreateBuckets = new Map<number, { windowStartMs: number; count: number }>();
+
+function getTaskCreateRpmLimit(config: any, plan: PlanKey): number {
+  const raw = (config && config.system && (config.system as any).taskCreateRpmByPlan && (config.system as any).taskCreateRpmByPlan[plan]) as any;
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : NaN;
+  if (Number.isFinite(n) && n > 0) return Math.max(1, Math.floor(n));
+  return TASK_CREATE_RPM_DEFAULT[plan] ?? TASK_CREATE_RPM_DEFAULT.FREE;
+}
+
+function enforceTaskCreateRateLimit(params: { userId: number; plan: PlanKey; config: any }) {
+  const limit = getTaskCreateRpmLimit(params.config, params.plan);
+  const now = Date.now();
+  const bucket = taskCreateBuckets.get(params.userId);
+
+  if (!bucket || now - bucket.windowStartMs >= TASK_CREATE_RATE_WINDOW_MS) {
+    taskCreateBuckets.set(params.userId, { windowStartMs: now, count: 1 });
+    return;
+  }
+
+  if (bucket.count >= limit) {
+    const retryAfterSeconds = Math.max(1, Math.ceil((TASK_CREATE_RATE_WINDOW_MS - (now - bucket.windowStartMs)) / 1000));
+    throw httpError(429, {
+      error: '请求过于频繁',
+      message: `请求过于频繁：每分钟最多创建 ${limit} 个任务，请稍后再试`,
+      limitPerMinute: limit,
+      retryAfterSeconds,
+    });
+  }
+
+  bucket.count += 1;
+  taskCreateBuckets.set(params.userId, bucket);
+}
+
+type TaskJob = {
+  taskId: string;
+  userId: number;
+  keyword: string;
+  selectedModels: string[];
+  searchType: 'quick' | 'deep';
+};
+
+const taskQueue: TaskJob[] = [];
+let taskRunningCount = 0;
+
+function getTaskMaxConcurrency(config: any): number {
+  const raw = (config && config.system && (config.system as any).taskMaxConcurrency) as any;
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : NaN;
+  if (Number.isFinite(n) && n > 0) return Math.max(1, Math.min(20, Math.floor(n)));
+  return 2;
+}
+
+function drainTaskQueue() {
+  const config = readAppConfig();
+  const max = getTaskMaxConcurrency(config);
+  while (taskRunningCount < max && taskQueue.length > 0) {
+    const job = taskQueue.shift();
+    if (!job) break;
+    taskRunningCount += 1;
+    simulateTaskProcessing(job.taskId, job.keyword, job.selectedModels, job.searchType)
+      .catch((err) => {
+        console.error('[TaskQueue] job failed', job.taskId, err);
+      })
+      .finally(() => {
+        taskRunningCount -= 1;
+        drainTaskQueue();
+      });
+  }
+}
+
+function enqueueTask(job: TaskJob) {
+  taskQueue.push(job);
+  const position = taskQueue.length;
+  prisma.task
+    .update({
+      where: { id: job.taskId },
+      data: {
+        logs: { push: `⏳ 已进入任务队列（排队第 ${position} 位）` },
+      },
+    })
+    .catch(() => {});
+  drainTaskQueue();
+}
+
 async function createTaskForUser(params: {
   user: any;
   keyword: any;
@@ -493,9 +586,10 @@ async function createTaskForUser(params: {
   }
 
   const config = readAppConfig();
+  const plan = normalizePlan(user.membership?.plan);
+  enforceTaskCreateRateLimit({ userId: user.id, plan, config });
   const billing = getBillingConfig(config);
   const usageDate = getShanghaiUsageDate();
-  const plan = user.membership?.plan || 'FREE';
   const dailyLimit = billing.dailyUnitsByPlan?.[plan] ?? billing.dailyUnitsByPlan.FREE;
 
   const estimatedCost = calculateTaskCostUnits({
@@ -644,8 +738,14 @@ async function createTaskForUser(params: {
     return { task, remainingPoints: updatedPoints };
   });
 
-  // Trigger background processing (simulate async)
-  simulateTaskProcessing(result.task.id, keyword, selectedModels, normalizedSearchType);
+  // Trigger background processing via in-process queue (avoid overloading the server)
+  enqueueTask({
+    taskId: result.task.id,
+    userId: user.id,
+    keyword,
+    selectedModels,
+    searchType: normalizedSearchType,
+  });
 
   return { task: result.task, started: true, remainingPoints: result.remainingPoints };
 }
