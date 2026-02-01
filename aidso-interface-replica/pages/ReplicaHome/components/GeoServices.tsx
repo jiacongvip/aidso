@@ -1,5 +1,6 @@
 import React from 'react';
 import { Search, Star, LineChart, MessageSquareMore, Circle } from 'lucide-react';
+import { SITE_NAME } from '../../../branding';
 
 const ServiceCard: React.FC<{
   icon: React.ReactNode;
@@ -92,7 +93,7 @@ const GeoServices: React.FC = () => {
           {/* Title */}
         <div className="text-center mb-16 relative">
           <h2 className="text-3xl font-extrabold text-gray-900 inline-block relative z-10">
-            轻快搜<span className="text-[#8b5cf6]">GEO</span>优化服务
+            {SITE_NAME}<span className="text-[#8b5cf6]">GEO</span>优化服务
           </h2>
           {/* Decorative underline for GEO */}
           <div className="absolute left-1/2 -translate-x-1/2 bottom-[-10px] w-12 h-1 bg-[#8b5cf6] rounded-full opacity-30 blur-[1px]"></div>

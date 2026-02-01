@@ -1,8 +1,9 @@
-import React, { Suspense } from 'react';
+import React, { Suspense, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, useNavigate } from 'react-router-dom';
 import { MainLayout } from './layouts/MainLayout';
 import { SearchProvider } from './contexts/SearchContext';
 import { AuthProvider, PermissionGuard, ProtectedRoute, useAuth } from './contexts/AuthContext';
+import { SITE_NAME } from './branding';
 
 import { ReplicaHomePage } from './pages/ReplicaHome/ReplicaHomePage';
 
@@ -163,6 +164,10 @@ const AdminPageWrapper = () => {
 };
 
 const App = () => {
+    useEffect(() => {
+        document.title = SITE_NAME;
+    }, [SITE_NAME]);
+
     return (
         <BrowserRouter>
             <AuthProvider>

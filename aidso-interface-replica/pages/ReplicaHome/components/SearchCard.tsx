@@ -6,6 +6,7 @@ import { useSearch } from '../../../contexts/SearchContext';
 import { useToast } from '../../../contexts/ToastContext';
 import { useTasks } from '../../../contexts/TaskContext';
 import { useAuth } from '../../../contexts/AuthContext';
+import { SITE_NAME } from '../../../branding';
 
 const PENDING_SEARCH_KEY = 'qingkuaisou_pending_search';
 const ALLOWED_MODEL_KEYS = new Set(['豆包', 'DeepSeek', '腾讯元宝', '文心', '通义千问', 'Kimi', '百度AI']);
@@ -16,18 +17,40 @@ function normalizeModelKey(name: string) {
   return name;
 }
 
+function modelKeysToPlatformIds(modelKeys: string[]) {
+  const map: Record<string, string[]> = {
+    '豆包': ['doubao-web', 'doubao-app'],
+    'DeepSeek': ['deepseek-web', 'deepseek-app'],
+    '腾讯元宝': ['yuanbao-web'],
+    '通义千问': ['qianwen-web'],
+    '百度AI': ['baidu-web'],
+    '文心': ['wenxin-web'],
+    'Kimi': ['kimi-web'],
+  };
+
+  const ids = modelKeys.flatMap((k) => map[normalizeModelKey(k)] || []);
+  const set = new Set(ids);
+  // Only keep ids that exist in the current PLATFORMS list.
+  return Array.from(set).filter((id) => PLATFORMS.some((p) => p.id === id));
+}
+
 const SearchCard: React.FC = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { addToast } = useToast();
   const { addTask } = useTasks();
-  const { setQuery, setSelectedBrands, setSearchType } = useSearch();
+  const { query: savedQuery, selectedBrands: savedSelectedBrands, searchType: savedSearchType, setQuery, setSelectedBrands, setSearchType } = useSearch();
 
   const [activeTab, setActiveTab] = useState<'search' | 'diagnosis'>('search');
-  const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>(PLATFORMS.map(p => p.id));
-  const [selectAll, setSelectAll] = useState(true);
-  const [deepThink, setDeepThink] = useState(false);
-  const [input, setInput] = useState('');
+  const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>(() => {
+    if (Array.isArray(savedSelectedBrands) && savedSelectedBrands.length > 0) {
+      return modelKeysToPlatformIds(savedSelectedBrands);
+    }
+    return [];
+  });
+  const [selectAll, setSelectAll] = useState(false);
+  const [deepThink, setDeepThink] = useState(savedSearchType === 'deep');
+  const [input, setInput] = useState(savedQuery || '');
 
   const selectedModels = useMemo(() => {
     const names = selectedPlatforms
@@ -236,7 +259,7 @@ const SearchCard: React.FC = () => {
           className="bg-gradient-to-r from-[#6366f1] to-[#a855f7] text-white px-8 py-2.5 rounded-lg font-medium shadow-lg shadow-purple-200 hover:shadow-purple-300 transform hover:-translate-y-0.5 transition-all text-sm"
           onClick={handleSubmit}
         >
-          轻快搜一下
+          {SITE_NAME}一下
         </button>
       </div>
       

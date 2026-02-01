@@ -13,6 +13,7 @@ import { PermissionSettings } from '../components/PermissionSettings';
 import { AddUserDrawer } from '../components/AddUserDrawer';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { apiFetch } from '../services/api';
+import { SITE_NAME } from '../branding';
 
 type AdminTab =
     | 'overview'
@@ -3328,7 +3329,7 @@ export const AdminPage = ({ onExit }: { onExit: () => void }) => {
                                 <div className="grid grid-cols-2 gap-6">
                                     <div>
                                         <label className="block text-xs font-bold text-gray-700 mb-2">站点名称</label>
-                                        <input type="text" defaultValue="轻快搜" className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:border-brand-purple outline-none" />
+                                        <input type="text" defaultValue={SITE_NAME} className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:border-brand-purple outline-none" />
                                     </div>
                                     <div>
                                         <label className="block text-xs font-bold text-gray-700 mb-2">管理员邮箱</label>
@@ -3414,7 +3415,7 @@ export const AdminPage = ({ onExit }: { onExit: () => void }) => {
             <div className="w-64 bg-gray-900 text-white flex flex-col fixed inset-y-0 left-0 z-50 shadow-xl">
                 <div className="h-16 flex items-center gap-3 px-6 border-b border-gray-800 bg-gray-900 z-10">
                     <div className="w-8 h-8 bg-brand-purple rounded-lg flex items-center justify-center text-white font-bold shadow-lg shadow-purple-900/50">A</div>
-                    <span className="font-bold text-lg tracking-tight">轻快搜 后台</span>
+                    <span className="font-bold text-lg tracking-tight">{SITE_NAME} 后台</span>
                 </div>
 
                 <div className="flex-1 py-6 space-y-1 px-3 overflow-y-auto scrollbar-hide">

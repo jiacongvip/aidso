@@ -1,6 +1,7 @@
 
 import React, { useState } from 'react';
 import { Search, Mail, Lock, Github, MessageCircle, Shield } from 'lucide-react';
+import { SITE_NAME } from '../branding';
 
 type ViewState = 'landing' | 'results' | 'login' | 'pricing' | 'api' | 'monitoring' | 'admin';
 
@@ -74,7 +75,7 @@ export const LoginPage = ({ onNavigate, onLoginSuccess }: { onNavigate: (page: V
                             <div className="w-8 h-8 bg-brand-purple rounded-lg flex items-center justify-center text-white shadow-md">
                                 <Search size={18} strokeWidth={2.5} />
                             </div>
-                            <span className="tracking-tight">轻快搜</span>
+                            <span className="tracking-tight">{SITE_NAME}</span>
                          </div>
                          <h2 className="text-gray-500 text-sm">{mode === 'login' ? '欢迎回来，请登录您的账户' : '创建新账户，开启 AI 探索之旅'}</h2>
                      </div>
