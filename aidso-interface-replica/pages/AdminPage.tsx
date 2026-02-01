@@ -1097,6 +1097,11 @@ export const AdminPage = ({ onExit }: { onExit: () => void }) => {
     const [maintenanceMode, setMaintenanceMode] = useState(false);
     const [signupEnabled, setSignupEnabled] = useState(true);
     const [siteName, setSiteName] = useState(publicConfig.siteName);
+    const [icp, setIcp] = useState('');
+    const [supportEmail, setSupportEmail] = useState('');
+    const [homeStatAiChats, setHomeStatAiChats] = useState('');
+    const [homeStatBrandMentions, setHomeStatBrandMentions] = useState('');
+    const [homeStatReferencedArticles, setHomeStatReferencedArticles] = useState('');
 
     useEffect(() => {
         apiFetch('/api/admin/config')
@@ -1106,11 +1111,33 @@ export const AdminPage = ({ onExit }: { onExit: () => void }) => {
                 setSignupEnabled(cfg?.system?.signupEnabled !== false);
                 const sn = typeof cfg?.system?.siteName === 'string' ? cfg.system.siteName.trim() : '';
                 setSiteName(sn || publicConfig.siteName);
+
+                const icpRaw = typeof cfg?.system?.icp === 'string' ? cfg.system.icp.trim() : '';
+                setIcp(icpRaw || '苏ICP备20250001号-1');
+
+                const seRaw = typeof cfg?.system?.supportEmail === 'string' ? cfg.system.supportEmail.trim() : '';
+                setSupportEmail(seRaw || 'admin@qingkuaisou.com');
+
+                const parseNonNegativeInt = (input: any, fallback: number) => {
+                    const raw =
+                        typeof input === 'number'
+                            ? input
+                            : typeof input === 'string'
+                            ? Number(input.replace(/,/g, '').trim())
+                            : NaN;
+                    if (!Number.isFinite(raw)) return fallback;
+                    const n = Math.floor(raw);
+                    return n >= 0 ? n : fallback;
+                };
+                const hs = cfg?.system?.homeStats;
+                setHomeStatAiChats(String(parseNonNegativeInt(hs?.aiChats, 718959)));
+                setHomeStatBrandMentions(String(parseNonNegativeInt(hs?.brandMentions, 3519392)));
+                setHomeStatReferencedArticles(String(parseNonNegativeInt(hs?.referencedArticles, 2042929)));
             })
             .catch(() => {});
     }, []);
 
-    const patchSystemConfig = async (patch: { maintenanceMode?: boolean, signupEnabled?: boolean, siteName?: string }) => {
+    const patchSystemConfig = async (patch: { maintenanceMode?: boolean, signupEnabled?: boolean, siteName?: string, icp?: string, supportEmail?: string, homeStats?: { aiChats?: number, brandMentions?: number, referencedArticles?: number } }) => {
         try {
             const res = await apiFetch('/api/admin/config/system', {
                 method: 'PATCH',
@@ -3347,8 +3374,83 @@ export const AdminPage = ({ onExit }: { onExit: () => void }) => {
                                         <div className="text-[10px] text-gray-400 mt-1">修改后失焦自动保存</div>
                                     </div>
                                     <div>
-                                        <label className="block text-xs font-bold text-gray-700 mb-2">管理员邮箱</label>
-                                        <input type="text" defaultValue="admin@qingkuaisou.com" className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:border-brand-purple outline-none" />
+                                        <label className="block text-xs font-bold text-gray-700 mb-2">ICP备案号</label>
+                                        <input
+                                            type="text"
+                                            value={icp}
+                                            onChange={(e) => setIcp(e.target.value)}
+                                            onBlur={() => patchSystemConfig({ icp })}
+                                            onKeyDown={(e) => {
+                                                if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                                            }}
+                                            className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:border-brand-purple outline-none"
+                                        />
+                                        <div className="text-[10px] text-gray-400 mt-1">展示在页脚（留空则使用默认值）</div>
+                                    </div>
+                                    <div className="col-span-2">
+                                        <label className="block text-xs font-bold text-gray-700 mb-2">联系邮箱</label>
+                                        <input
+                                            type="text"
+                                            value={supportEmail}
+                                            onChange={(e) => setSupportEmail(e.target.value)}
+                                            onBlur={() => patchSystemConfig({ supportEmail })}
+                                            onKeyDown={(e) => {
+                                                if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                                            }}
+                                            className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:border-brand-purple outline-none"
+                                        />
+                                        <div className="text-[10px] text-gray-400 mt-1">用于站点联系方式/通知等（留空则使用默认值）</div>
+                                    </div>
+                                </div>
+
+                                <div className="p-4 bg-gray-50 rounded-xl border border-gray-200">
+                                    <div>
+                                        <div className="font-bold text-sm text-gray-900">首页统计</div>
+                                        <div className="text-xs text-gray-500 mt-0.5">用于首页搜索卡片底部展示（支持输入 1,234,567）</div>
+                                    </div>
+                                    <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+                                        <div>
+                                            <label className="block text-[10px] font-bold text-gray-700 mb-2">监测AI对话</label>
+                                            <input
+                                                type="text"
+                                                value={homeStatAiChats}
+                                                onChange={(e) => setHomeStatAiChats(e.target.value)}
+                                                onBlur={() => {
+                                                    const raw = homeStatAiChats.replace(/,/g, '').trim();
+                                                    const n = Number(raw);
+                                                    if (Number.isFinite(n) && n >= 0) patchSystemConfig({ homeStats: { aiChats: Math.floor(n) } });
+                                                }}
+                                                className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:border-brand-purple outline-none"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-[10px] font-bold text-gray-700 mb-2">追踪AI提及品牌</label>
+                                            <input
+                                                type="text"
+                                                value={homeStatBrandMentions}
+                                                onChange={(e) => setHomeStatBrandMentions(e.target.value)}
+                                                onBlur={() => {
+                                                    const raw = homeStatBrandMentions.replace(/,/g, '').trim();
+                                                    const n = Number(raw);
+                                                    if (Number.isFinite(n) && n >= 0) patchSystemConfig({ homeStats: { brandMentions: Math.floor(n) } });
+                                                }}
+                                                className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:border-brand-purple outline-none"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-[10px] font-bold text-gray-700 mb-2">收录引用文章</label>
+                                            <input
+                                                type="text"
+                                                value={homeStatReferencedArticles}
+                                                onChange={(e) => setHomeStatReferencedArticles(e.target.value)}
+                                                onBlur={() => {
+                                                    const raw = homeStatReferencedArticles.replace(/,/g, '').trim();
+                                                    const n = Number(raw);
+                                                    if (Number.isFinite(n) && n >= 0) patchSystemConfig({ homeStats: { referencedArticles: Math.floor(n) } });
+                                                }}
+                                                className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:border-brand-purple outline-none"
+                                            />
+                                        </div>
                                     </div>
                                 </div>
                                 <div className="flex items-center justify-between p-4 bg-gray-50 rounded-xl border border-gray-200">

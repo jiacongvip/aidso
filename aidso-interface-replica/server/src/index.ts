@@ -1521,6 +1521,29 @@ app.get('/api/config/public', (req, res) => {
     const siteName = typeof siteNameRaw === 'string' ? siteNameRaw.trim() : '';
     const maintenanceMode = !!(config && config.system && (config.system as any).maintenanceMode);
     const signupEnabled = !(config && config.system && (config.system as any).signupEnabled === false);
+    const icpRaw = (config && config.system && (config.system as any).icp) as any;
+    const icp = typeof icpRaw === 'string' ? icpRaw.trim() : '';
+    const supportEmailRaw = (config && config.system && (config.system as any).supportEmail) as any;
+    const supportEmail = typeof supportEmailRaw === 'string' ? supportEmailRaw.trim() : '';
+
+    const parseNonNegativeInt = (input: any, fallback: number) => {
+      const raw =
+        typeof input === 'number'
+          ? input
+          : typeof input === 'string'
+          ? Number(input.replace(/,/g, '').trim())
+          : NaN;
+      if (!Number.isFinite(raw)) return fallback;
+      const n = Math.floor(raw);
+      return n >= 0 ? n : fallback;
+    };
+
+    const homeStatsRaw = (config && config.system && (config.system as any).homeStats) as any;
+    const homeStats = {
+      aiChats: parseNonNegativeInt(homeStatsRaw?.aiChats, 718_959),
+      brandMentions: parseNonNegativeInt(homeStatsRaw?.brandMentions, 3_519_392),
+      referencedArticles: parseNonNegativeInt(homeStatsRaw?.referencedArticles, 2_042_929),
+    };
 
     const models = config?.newApi?.models;
     const enabledModelsRaw =
@@ -1554,6 +1577,9 @@ app.get('/api/config/public', (req, res) => {
       siteName: siteName || null,
       maintenanceMode,
       signupEnabled,
+      icp: icp || null,
+      supportEmail: supportEmail || null,
+      homeStats,
       enabledModels: enabledModelsRaw,
       models: modelStates,
     });
@@ -1670,11 +1696,60 @@ app.patch('/api/admin/config/system', requireAdmin(), async (req, res) => {
         ? siteNameRaw.trim().slice(0, 50)
         : undefined;
 
+    const icpRaw = patch?.icp;
+    const icp =
+      typeof icpRaw === 'string'
+        ? icpRaw.trim().slice(0, 120)
+        : undefined;
+
+    const supportEmailRaw = patch?.supportEmail;
+    const supportEmail =
+      typeof supportEmailRaw === 'string'
+        ? supportEmailRaw.trim().slice(0, 120)
+        : undefined;
+
+    const homeStatsPatch = patch?.homeStats;
+    const parsePatchNonNegativeInt = (input: any) => {
+      const raw =
+        typeof input === 'number'
+          ? input
+          : typeof input === 'string'
+          ? Number(input.replace(/,/g, '').trim())
+          : NaN;
+      if (!Number.isFinite(raw)) return null;
+      const n = Math.floor(raw);
+      return n >= 0 ? n : null;
+    };
+
+    const prevHomeStats = (config?.system as any)?.homeStats;
+    const nextHomeStats = (() => {
+      if (!homeStatsPatch || typeof homeStatsPatch !== 'object') return undefined;
+      const next: any = {};
+
+      if (Object.prototype.hasOwnProperty.call(homeStatsPatch, 'aiChats')) {
+        const n = parsePatchNonNegativeInt((homeStatsPatch as any).aiChats);
+        if (n !== null) next.aiChats = n;
+      }
+      if (Object.prototype.hasOwnProperty.call(homeStatsPatch, 'brandMentions')) {
+        const n = parsePatchNonNegativeInt((homeStatsPatch as any).brandMentions);
+        if (n !== null) next.brandMentions = n;
+      }
+      if (Object.prototype.hasOwnProperty.call(homeStatsPatch, 'referencedArticles')) {
+        const n = parsePatchNonNegativeInt((homeStatsPatch as any).referencedArticles);
+        if (n !== null) next.referencedArticles = n;
+      }
+
+      return Object.keys(next).length > 0 ? next : undefined;
+    })();
+
     const nextSystem = {
       ...(config.system || {}),
       ...(typeof patch.maintenanceMode === 'boolean' ? { maintenanceMode: patch.maintenanceMode } : {}),
       ...(typeof patch.signupEnabled === 'boolean' ? { signupEnabled: patch.signupEnabled } : {}),
       ...(typeof siteName === 'string' ? { siteName } : {}),
+      ...(typeof icp === 'string' ? { icp } : {}),
+      ...(typeof supportEmail === 'string' ? { supportEmail } : {}),
+      ...(nextHomeStats ? { homeStats: { ...(prevHomeStats || {}), ...nextHomeStats } } : {}),
     };
 
     const nextConfig = { ...config, system: nextSystem };

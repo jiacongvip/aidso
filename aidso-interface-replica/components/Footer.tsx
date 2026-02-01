@@ -89,7 +89,7 @@ export const Footer = () => {
                     <span className="hover:text-gray-600 cursor-pointer">隐私政策</span>
                     <span className="hover:text-gray-600 cursor-pointer">服务条款</span>
                     <span className="hidden md:inline text-gray-200">|</span>
-                    <span>苏ICP备20250001号-1</span>
+                    <span>{config.icp}</span>
                 </div>
                 
                 <div className="flex items-center gap-2 text-gray-400 hover:text-gray-600 cursor-pointer bg-gray-50 px-3 py-1.5 rounded-full transition-colors">

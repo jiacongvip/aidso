@@ -58,6 +58,7 @@ const SearchCard: React.FC = () => {
   const { addTask } = useTasks();
   const { query: savedQuery, selectedBrands: savedSelectedBrands, searchType: savedSearchType, setQuery, setSelectedBrands, setSearchType } = useSearch();
   const { config: publicConfig, error: publicConfigError } = usePublicConfig();
+  const formatCount = (n: number) => new Intl.NumberFormat('en-US').format(n);
 
   const enabledModelStates = useMemo(() => {
     const fromStates = Array.isArray(publicConfig.models) ? publicConfig.models : [];
@@ -339,9 +340,9 @@ const SearchCard: React.FC = () => {
       
       {/* Footer Stats */}
       <div className="mt-4 pt-4 border-t border-gray-100 flex justify-between text-[10px] text-gray-400">
-         <span>监测AI对话 <span className="text-purple-500">718,959</span></span>
-         <span>追踪AI提及品牌 <span className="text-purple-500">3,519,392</span></span>
-         <span>收录引用文章 <span className="text-purple-500">2,042,929</span></span>
+         <span>监测AI对话 <span className="text-purple-500">{formatCount(publicConfig.homeStats.aiChats)}</span></span>
+         <span>追踪AI提及品牌 <span className="text-purple-500">{formatCount(publicConfig.homeStats.brandMentions)}</span></span>
+         <span>收录引用文章 <span className="text-purple-500">{formatCount(publicConfig.homeStats.referencedArticles)}</span></span>
       </div>
 
     </div>
