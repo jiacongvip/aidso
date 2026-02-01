@@ -108,6 +108,7 @@ export function SeoSync() {
 
   useEffect(() => {
     const meta = buildMeta({ siteName: config.siteName, pathname: location.pathname, query });
+    const ogImage = `${window.location.origin}/og.png`;
 
     document.title = meta.title;
 
@@ -116,13 +117,16 @@ export function SeoSync() {
 
     upsertMeta({ property: 'og:title', content: meta.title });
     upsertMeta({ property: 'og:description', content: meta.description });
+    upsertMeta({ property: 'og:site_name', content: config.siteName || '轻快搜' });
     upsertMeta({ property: 'og:type', content: 'website' });
     upsertMeta({ property: 'og:locale', content: 'zh_CN' });
     upsertMeta({ property: 'og:url', content: window.location.href });
+    upsertMeta({ property: 'og:image', content: ogImage });
 
-    upsertMeta({ name: 'twitter:card', content: 'summary' });
+    upsertMeta({ name: 'twitter:card', content: 'summary_large_image' });
     upsertMeta({ name: 'twitter:title', content: meta.title });
     upsertMeta({ name: 'twitter:description', content: meta.description });
+    upsertMeta({ name: 'twitter:image', content: ogImage });
 
     // Best-effort canonical (drop query/hash)
     const canonical = `${window.location.origin}${location.pathname}`;
@@ -131,4 +135,3 @@ export function SeoSync() {
 
   return null;
 }
-

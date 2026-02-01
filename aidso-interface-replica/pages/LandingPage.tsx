@@ -55,7 +55,7 @@ const RealTimeMonitor = () => {
             {logs.map((log) => (
                 <div key={log.id} className="flex items-center gap-3 text-xs p-2 rounded-lg bg-white/5 border border-white/5 animate-slide-in-right">
                     <div className="w-1.5 h-1.5 rounded-full bg-green-400 shadow-[0_0_8px_rgba(74,222,128,0.5)]"></div>
-                    <span className="text-gray-300 font-mono">Synced</span>
+                    <span className="text-gray-300 font-mono">已同步</span>
                     <span className="text-gray-400 truncate flex-1">{log.node}</span>
                     <span className="text-brand-purple font-bold">{log.latency}ms</span>
                 </div>

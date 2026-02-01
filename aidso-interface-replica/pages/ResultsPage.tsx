@@ -461,9 +461,9 @@ export const ResultsPage = () => {
                                     <div className="flex items-center gap-2">
                                         <Database size={14} className="text-brand-purple" />
                                         已同步 {selectedPlatform} 搜索记录
-                                        <span className="bg-green-100 text-green-700 text-[10px] px-2 py-0.5 rounded-full font-mono flex items-center gap-1">
-                                            <RefreshCw size={8} className="animate-spin" style={{animationDuration: '3s'}} />
-                                            LIVE
+                                            <span className="bg-green-100 text-green-700 text-[10px] px-2 py-0.5 rounded-full font-mono flex items-center gap-1">
+                                                <RefreshCw size={8} className="animate-spin" style={{animationDuration: '3s'}} />
+                                            实时
                                         </span>
                                     </div>
                                     

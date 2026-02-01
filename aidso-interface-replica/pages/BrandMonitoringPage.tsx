@@ -679,7 +679,7 @@ const DashboardView = ({
 	                    <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
 	                        数据大盘
 	                        <span className="text-xs font-normal text-white bg-green-500 px-2 py-0.5 rounded-full flex items-center gap-1 shadow-sm animate-pulse">
-	                            <span className="w-1.5 h-1.5 bg-white rounded-full"></span> Live
+	                            <span className="w-1.5 h-1.5 bg-white rounded-full"></span> 实时
 	                        </span>
 	                    </h1>
 	                    <p className="text-sm text-gray-400 mt-1 font-medium">

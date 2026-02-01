@@ -1,0 +1,11 @@
+User-agent: *
+Disallow: /admin
+Disallow: /me
+Disallow: /results
+Disallow: /maintenance
+Disallow: /monitoring
+Disallow: /optimization
+Disallow: /agent
+Disallow: /api/
+
+Sitemap: /sitemap.xml
