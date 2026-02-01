@@ -21,7 +21,7 @@ export const ReplicaHomePage: React.FC = () => {
           <div className="absolute bottom-[-10%] right-[-10%] w-[60%] h-[80%] bg-purple-200 rounded-full blur-[100px] opacity-40"></div>
         </div>
 
-        <div className="container mx-auto px-4 z-10 flex flex-col items-center lg:flex-row lg:justify-between h-full py-12">
+        <div className="container mx-auto px-4 z-10 flex flex-col items-center lg:flex-row lg:justify-between h-full pt-16 pb-12">
           {/* Left Side: Headline & Search */}
           <div className="flex flex-col items-center lg:items-start w-full lg:w-[70%] lg:pl-16">
             <h1 className="text-3xl md:text-4xl lg:text-[40px] font-extrabold mb-8 text-gray-800 tracking-tight text-center lg:text-left">

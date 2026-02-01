@@ -8,7 +8,8 @@ import { usePublicConfig } from '../contexts/PublicConfigContext';
 export const Navbar = ({ isLanding: propIsLanding }: { isLanding?: boolean }) => {
   const navigate = useNavigate();
   const location = useLocation();
-  const isLanding = propIsLanding ?? (location.pathname === '/' || location.pathname === '/landing');
+  // Keep nav consistent across most pages. "Landing" style is only for the legacy /landing page.
+  const isLanding = propIsLanding ?? (location.pathname === '/landing');
   const { checkPermission, user, logout } = useAuth();
   const { config } = usePublicConfig();
   
