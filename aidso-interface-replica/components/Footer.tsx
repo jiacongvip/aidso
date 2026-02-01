@@ -12,7 +12,7 @@ export const Footer = () => (
                         <div className="w-8 h-8 bg-brand-purple rounded-lg flex items-center justify-center text-white shadow-md group-hover:scale-105 transition-transform">
                             <Search size={18} strokeWidth={2.5} />
                         </div>
-                        <span>AiGEO 蠕虫系统</span>
+                        <span>轻快搜</span>
                     </div>
                     <p className="text-gray-500 text-sm leading-relaxed mb-6 max-w-sm">
                         打破信息茧房，洞察算法逻辑。
@@ -81,7 +81,7 @@ export const Footer = () => (
 
             <div className="border-t border-gray-100 pt-8 flex flex-col md:flex-row justify-between items-center gap-4">
                 <div className="text-gray-400 text-xs font-medium flex flex-col md:flex-row items-center gap-4">
-                    <span>© 2025 AiGEO Analytics Inc. All rights reserved.</span>
+                    <span>© 2025 轻快搜. All rights reserved.</span>
                     <span className="hidden md:inline text-gray-200">|</span>
                     <span className="hover:text-gray-600 cursor-pointer">隐私政策</span>
                     <span className="hover:text-gray-600 cursor-pointer">服务条款</span>

@@ -138,7 +138,7 @@ const SearchCard: React.FC = () => {
           className="bg-gradient-to-r from-[#6366f1] to-[#a855f7] text-white px-8 py-2.5 rounded-lg font-medium shadow-lg shadow-purple-200 hover:shadow-purple-300 transform hover:-translate-y-0.5 transition-all text-sm"
           onClick={() => navigate('/results')}
         >
-          爱搜一下
+          轻快搜一下
         </button>
       </div>
       

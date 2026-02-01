@@ -89,10 +89,10 @@ const GeoServices: React.FC = () => {
     <section className="w-full py-16 bg-[#f8f9fc]">
       <div className="max-w-7xl mx-auto px-4">
         
-        {/* Title */}
+          {/* Title */}
         <div className="text-center mb-16 relative">
           <h2 className="text-3xl font-extrabold text-gray-900 inline-block relative z-10">
-            爱搜<span className="text-[#8b5cf6]">GEO</span>优化服务
+            轻快搜<span className="text-[#8b5cf6]">GEO</span>优化服务
           </h2>
           {/* Decorative underline for GEO */}
           <div className="absolute left-1/2 -translate-x-1/2 bottom-[-10px] w-12 h-1 bg-[#8b5cf6] rounded-full opacity-30 blur-[1px]"></div>
