@@ -1,9 +1,10 @@
-import React, { Suspense, useEffect } from 'react';
+import React, { Suspense } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, Outlet, useNavigate } from 'react-router-dom';
 import { MainLayout } from './layouts/MainLayout';
 import { SearchProvider } from './contexts/SearchContext';
 import { AuthProvider, PermissionGuard, ProtectedRoute, useAuth } from './contexts/AuthContext';
 import { PublicConfigProvider, usePublicConfig } from './contexts/PublicConfigContext';
+import { SeoSync } from './components/SeoSync';
 
 import { ReplicaHomePage } from './pages/ReplicaHome/ReplicaHomePage';
 
@@ -190,21 +191,13 @@ const AdminPageWrapper = () => {
     );
 };
 
-const TitleSync = () => {
-    const { config } = usePublicConfig();
-    useEffect(() => {
-        document.title = config.siteName;
-    }, [config.siteName]);
-    return null;
-};
-
 const App = () => {
     return (
         <BrowserRouter>
             <AuthProvider>
                 <PublicConfigProvider>
                     <SearchProvider>
-                        <TitleSync />
+                        <SeoSync />
                         <AppContent />
                     </SearchProvider>
                 </PublicConfigProvider>
