@@ -218,7 +218,7 @@ export const ResultsPage = () => {
     const { addToast } = useToast();
     const { user } = useAuth();
     const { config: publicConfig } = usePublicConfig();
-    const { tasks, activeTaskId, addTask, deleteTask } = useTasks();
+    const { tasks, activeTaskId, addTask, deleteTask, refreshTasks } = useTasks();
 
     const activeTask = tasks.find(t => t.id === activeTaskId) || tasks[0] || null;
     const isTaskRunning = !!activeTask && (activeTask.status === 'running' || activeTask.status === 'pending');
@@ -235,6 +235,7 @@ export const ResultsPage = () => {
     const [runsLoading, setRunsLoading] = useState(false);
     const [runsError, setRunsError] = useState('');
     const [showBrandKeywordModal, setShowBrandKeywordModal] = useState(false);
+    const [isRetrying, setIsRetrying] = useState(false);
 
     useEffect(() => {
         getBillingPricing().then(setPricing);
@@ -303,6 +304,37 @@ export const ResultsPage = () => {
         }
     };
 
+    const handleRetry = async () => {
+        if (!activeTask) return;
+        if (activeTask.status !== 'failed') return;
+        if (isRetrying) return;
+
+        if (!user) {
+            addToast('请先登录后重试', 'info');
+            navigate('/login');
+            return;
+        }
+
+        setIsRetrying(true);
+        try {
+            const { res, data } = await apiJson<any>(`/api/tasks/${activeTask.id}/retry`, { method: 'POST' });
+            if (!res.ok) throw new Error((data as any)?.error || (data as any)?.message || `重试失败（HTTP ${res.status}）`);
+
+            setTaskRunsById((prev) => {
+                const next = { ...prev };
+                delete (next as any)[activeTask.id];
+                return next;
+            });
+
+            await refreshTasks();
+            addToast('已开始重试任务', 'success');
+        } catch (err: any) {
+            addToast(err?.message || '重试失败', 'error');
+        } finally {
+            setIsRetrying(false);
+        }
+    };
+
     // Simulate fetching trace logs when switching platforms
     useEffect(() => {
         if(showDetail) {
@@ -361,6 +393,7 @@ export const ResultsPage = () => {
 	                   <ResultCard 
 	                        task={activeTask}
 	                        onOpenDetail={() => setShowDetail(true)}
+                            onRetry={handleRetry}
 	                        onOpenBrandKeywords={() => setShowBrandKeywordModal(true)}
 	                   />
 	               )}

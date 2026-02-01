@@ -1842,6 +1842,38 @@ app.patch('/api/admin/config/system', requireAdmin(), async (req, res) => {
       return Object.keys(next).length > 0 ? next : undefined;
     })();
 
+    const taskMaxConcurrencyRaw = patch?.taskMaxConcurrency;
+    const taskMaxConcurrencyNum = typeof taskMaxConcurrencyRaw === 'number' ? taskMaxConcurrencyRaw : typeof taskMaxConcurrencyRaw === 'string' ? Number(taskMaxConcurrencyRaw) : NaN;
+    const taskMaxConcurrency = Number.isFinite(taskMaxConcurrencyNum)
+      ? Math.max(1, Math.min(20, Math.floor(taskMaxConcurrencyNum)))
+      : undefined;
+
+    const taskCreateRpmByPlanPatch = patch?.taskCreateRpmByPlan;
+    const parsePatchRpm = (input: any) => {
+      const raw = typeof input === 'number' ? input : typeof input === 'string' ? Number(input) : NaN;
+      if (!Number.isFinite(raw)) return null;
+      const n = Math.floor(raw);
+      return n > 0 ? n : null;
+    };
+    const prevTaskCreateRpmByPlan = (config?.system as any)?.taskCreateRpmByPlan;
+    const nextTaskCreateRpmByPlan = (() => {
+      if (!taskCreateRpmByPlanPatch || typeof taskCreateRpmByPlanPatch !== 'object') return undefined;
+      const next: any = {};
+      if (Object.prototype.hasOwnProperty.call(taskCreateRpmByPlanPatch, 'FREE')) {
+        const n = parsePatchRpm((taskCreateRpmByPlanPatch as any).FREE);
+        if (n !== null) next.FREE = n;
+      }
+      if (Object.prototype.hasOwnProperty.call(taskCreateRpmByPlanPatch, 'PRO')) {
+        const n = parsePatchRpm((taskCreateRpmByPlanPatch as any).PRO);
+        if (n !== null) next.PRO = n;
+      }
+      if (Object.prototype.hasOwnProperty.call(taskCreateRpmByPlanPatch, 'ENTERPRISE')) {
+        const n = parsePatchRpm((taskCreateRpmByPlanPatch as any).ENTERPRISE);
+        if (n !== null) next.ENTERPRISE = n;
+      }
+      return Object.keys(next).length > 0 ? { ...(prevTaskCreateRpmByPlan || {}), ...next } : undefined;
+    })();
+
     const nextSystem = {
       ...(config.system || {}),
       ...(typeof patch.maintenanceMode === 'boolean' ? { maintenanceMode: patch.maintenanceMode } : {}),
@@ -1850,6 +1882,8 @@ app.patch('/api/admin/config/system', requireAdmin(), async (req, res) => {
       ...(typeof icp === 'string' ? { icp } : {}),
       ...(typeof supportEmail === 'string' ? { supportEmail } : {}),
       ...(nextHomeStats ? { homeStats: { ...(prevHomeStats || {}), ...nextHomeStats } } : {}),
+      ...(typeof taskMaxConcurrency === 'number' ? { taskMaxConcurrency } : {}),
+      ...(nextTaskCreateRpmByPlan ? { taskCreateRpmByPlan: nextTaskCreateRpmByPlan } : {}),
     };
 
     const nextConfig = { ...config, system: nextSystem };
@@ -2150,6 +2184,59 @@ app.get('/api/tasks/:id/runs', requireAuth(), async (req, res) => {
   } catch (error) {
     console.error('Failed to fetch task runs', error);
     res.status(500).json({ error: 'Failed to fetch task runs' });
+  }
+});
+
+// 3.3 Retry Task (no extra billing; re-run the same task id)
+app.post('/api/tasks/:id/retry', requireAuth(), async (req, res) => {
+  const user = (req as any).user;
+  const rawId = (req.params as any).id as string | string[] | undefined;
+  const id = Array.isArray(rawId) ? rawId[0] : rawId;
+  if (!id) return res.status(400).json({ error: 'Invalid task id' });
+
+  try {
+    const task = await prisma.task.findUnique({ where: { id } });
+    const isAdmin = user?.role === 'ADMIN';
+    if (!task || (!isAdmin && task.userId !== user.id)) return res.status(404).json({ error: 'Task not found' });
+
+    if (task.status !== 'FAILED') {
+      return res.status(400).json({ error: 'Only failed tasks can be retried' });
+    }
+
+    const selectedModels = Array.isArray(task.selectedModels)
+      ? (task.selectedModels as any[]).filter((m) => typeof m === 'string' && m.trim()).map((m) => m.trim())
+      : [];
+    if (selectedModels.length === 0) return res.status(400).json({ error: 'Task has no selected models' });
+
+    const searchType = task.searchType === 'deep' ? 'deep' : 'quick';
+
+    // Clear derived data to avoid double counting (runs/brand mentions).
+    await prisma.brandMention.deleteMany({ where: { taskId: id } }).catch(() => {});
+    await prisma.taskModelRun.deleteMany({ where: { taskId: id } }).catch(() => {});
+
+    await prisma.task.update({
+      where: { id },
+      data: {
+        status: 'PENDING',
+        progress: 0,
+        result: null,
+        logs: { push: '♻️ 已触发重试（不重复扣费），任务将重新排队执行' },
+        startTime: new Date(),
+      },
+    });
+
+    enqueueTask({
+      taskId: id,
+      userId: typeof task.userId === 'number' ? task.userId : user.id,
+      keyword: task.keyword,
+      selectedModels,
+      searchType,
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Failed to retry task', error);
+    res.status(500).json({ error: 'Failed to retry task' });
   }
 });
 
@@ -6005,10 +6092,71 @@ function startMonitoringScheduler() {
   setInterval(tick, intervalMs);
 }
 
+async function recoverStuckTasksOnStartup() {
+  try {
+    const tasks = await prisma.task.findMany({
+      where: { status: { in: ['PENDING', 'RUNNING'] } as any },
+      orderBy: { createdAt: 'asc' },
+      take: 200,
+      select: {
+        id: true,
+        userId: true,
+        keyword: true,
+        searchType: true,
+        selectedModels: true,
+        status: true,
+      },
+    });
+
+    if (!tasks || tasks.length === 0) return;
+    console.log(`[TaskQueue] Recovering ${tasks.length} pending/running tasks...`);
+
+    for (const t of tasks) {
+      if (typeof t.userId !== 'number') continue;
+      const selectedModels = Array.isArray(t.selectedModels)
+        ? (t.selectedModels as any[]).filter((m) => typeof m === 'string' && m.trim()).map((m) => m.trim())
+        : [];
+      if (selectedModels.length === 0) continue;
+
+      const searchType = t.searchType === 'deep' ? 'deep' : 'quick';
+
+      if (t.status === 'RUNNING') {
+        // Clear derived data to avoid duplicates after restart.
+        await prisma.brandMention.deleteMany({ where: { taskId: t.id } }).catch(() => {});
+        await prisma.taskModelRun.deleteMany({ where: { taskId: t.id } }).catch(() => {});
+        await prisma.task
+          .update({
+            where: { id: t.id },
+            data: {
+              status: 'PENDING',
+              progress: 0,
+              result: null,
+              logs: { push: '♻️ 服务重启：检测到任务中断，已恢复并重新排队执行' },
+              startTime: new Date(),
+            },
+          })
+          .catch(() => {});
+      } else {
+        await prisma.task
+          .update({
+            where: { id: t.id },
+            data: { logs: { push: '♻️ 服务重启：任务重新排队执行' } },
+          })
+          .catch(() => {});
+      }
+
+      enqueueTask({ taskId: t.id, userId: t.userId, keyword: t.keyword, selectedModels, searchType });
+    }
+  } catch (err) {
+    console.error('[TaskQueue] Failed to recover tasks on startup', err);
+  }
+}
+
 // 启动服务器
 async function startServer() {
   // 先初始化配置缓存
   await initConfigCache();
+  await recoverStuckTasksOnStartup();
   
   app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);

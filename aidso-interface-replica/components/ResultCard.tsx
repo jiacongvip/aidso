@@ -1,6 +1,6 @@
 
 import React from 'react';
-import { MessageCircle, ChevronDown, Trash2, Flame, Globe } from 'lucide-react';
+import { MessageCircle, ChevronDown, Trash2, Flame, Globe, RefreshCw } from 'lucide-react';
 import { getCurrentTime } from '../utils';
 import { BRANDS } from '../data';
 import type { Task } from '../contexts/TaskContext';
@@ -26,11 +26,12 @@ export const MetricItem = ({ label, value, sub, icon, isFire, className }: { lab
 interface ResultCardProps {
     task: Task;
     onOpenDetail: () => void;
+    onRetry?: () => void;
     onDelete?: () => void;
     onOpenBrandKeywords?: () => void;
 }
 
-export const ResultCard = ({ task, onOpenDetail, onDelete, onOpenBrandKeywords }: ResultCardProps) => {
+export const ResultCard = ({ task, onOpenDetail, onRetry, onDelete, onOpenBrandKeywords }: ResultCardProps) => {
     const { date, time } = getCurrentTime();
 
     return (
@@ -72,6 +73,15 @@ export const ResultCard = ({ task, onOpenDetail, onDelete, onOpenBrandKeywords }
                             <MessageCircle size={14} strokeWidth={2.5} />
                             查看AI对话
                         </button>
+                        {task.status === 'failed' && onRetry && (
+                            <button
+                                onClick={onRetry}
+                                className="bg-gray-900 text-white px-3.5 py-1.5 rounded-full text-xs font-bold hover:bg-gray-800 shadow-md shadow-gray-200 transition-all flex items-center gap-1.5 active:scale-[0.98] whitespace-nowrap"
+                            >
+                                <RefreshCw size={14} strokeWidth={2.5} />
+                                重试
+                            </button>
+                        )}
                         <button className="bg-gray-50 text-brand-purple border border-gray-100 hover:bg-purple-50 hover:border-purple-100 px-3.5 py-1.5 rounded-full text-xs font-bold transition-all flex items-center gap-1 active:scale-[0.98] whitespace-nowrap">
                             收起结果 <ChevronDown size={14} className="rotate-180" />
                         </button>

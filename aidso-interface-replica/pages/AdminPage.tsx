@@ -1102,6 +1102,10 @@ export const AdminPage = ({ onExit }: { onExit: () => void }) => {
     const [homeStatAiChats, setHomeStatAiChats] = useState('');
     const [homeStatBrandMentions, setHomeStatBrandMentions] = useState('');
     const [homeStatReferencedArticles, setHomeStatReferencedArticles] = useState('');
+    const [taskMaxConcurrency, setTaskMaxConcurrency] = useState('2');
+    const [taskCreateRpmFree, setTaskCreateRpmFree] = useState('6');
+    const [taskCreateRpmPro, setTaskCreateRpmPro] = useState('30');
+    const [taskCreateRpmEnterprise, setTaskCreateRpmEnterprise] = useState('120');
 
     useEffect(() => {
         apiFetch('/api/admin/config')
@@ -1133,11 +1137,31 @@ export const AdminPage = ({ onExit }: { onExit: () => void }) => {
                 setHomeStatAiChats(String(parseNonNegativeInt(hs?.aiChats, 718959)));
                 setHomeStatBrandMentions(String(parseNonNegativeInt(hs?.brandMentions, 3519392)));
                 setHomeStatReferencedArticles(String(parseNonNegativeInt(hs?.referencedArticles, 2042929)));
+
+                const parsePositiveInt = (input: any, fallback: number) => {
+                    const raw =
+                        typeof input === 'number'
+                            ? input
+                            : typeof input === 'string'
+                            ? Number(input.replace(/,/g, '').trim())
+                            : NaN;
+                    if (!Number.isFinite(raw)) return fallback;
+                    const n = Math.floor(raw);
+                    return n > 0 ? n : fallback;
+                };
+
+                const tmc = cfg?.system?.taskMaxConcurrency;
+                setTaskMaxConcurrency(String(parsePositiveInt(tmc, 2)));
+
+                const rpm = cfg?.system?.taskCreateRpmByPlan;
+                setTaskCreateRpmFree(String(parsePositiveInt(rpm?.FREE, 6)));
+                setTaskCreateRpmPro(String(parsePositiveInt(rpm?.PRO, 30)));
+                setTaskCreateRpmEnterprise(String(parsePositiveInt(rpm?.ENTERPRISE, 120)));
             })
             .catch(() => {});
     }, []);
 
-    const patchSystemConfig = async (patch: { maintenanceMode?: boolean, signupEnabled?: boolean, siteName?: string, icp?: string, supportEmail?: string, homeStats?: { aiChats?: number, brandMentions?: number, referencedArticles?: number } }) => {
+    const patchSystemConfig = async (patch: { maintenanceMode?: boolean, signupEnabled?: boolean, siteName?: string, icp?: string, supportEmail?: string, homeStats?: { aiChats?: number, brandMentions?: number, referencedArticles?: number }, taskMaxConcurrency?: number, taskCreateRpmByPlan?: { FREE?: number, PRO?: number, ENTERPRISE?: number } }) => {
         try {
             const res = await apiFetch('/api/admin/config/system', {
                 method: 'PATCH',
@@ -3488,35 +3512,107 @@ export const AdminPage = ({ onExit }: { onExit: () => void }) => {
                             </div>
                         </div>
 
-                        {/* API Limits */}
+                        {/* Task Queue & Rate Limits */}
                         <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
                             <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
                                 <h3 className="font-bold text-gray-900 flex items-center gap-2">
                                     <Server size={18} className="text-gray-500" />
-                                    API 速率限制 (Rate Limiting)
+                                    任务队列与限流
                                 </h3>
                             </div>
                             <div className="p-6">
                                 <div className="space-y-4">
-                                    {['免费版 (Free)', '开发者版 (Pro)', '企业版 (Enterprise)'].map((plan, i) => (
-                                        <div key={i} className="flex items-center justify-between">
-                                            <span className="text-sm font-medium text-gray-700">{plan}</span>
-                                            <div className="flex items-center gap-2">
-                                                <input 
-                                                    type="number" 
-                                                    defaultValue={i === 0 ? 60 : i === 1 ? 1000 : 10000} 
-                                                    className="w-24 px-2 py-1 border border-gray-200 rounded text-sm text-right" 
-                                                />
-                                                <span className="text-xs text-gray-400">req/min</span>
+                                    <div className="flex items-center justify-between p-4 bg-gray-50 rounded-xl border border-gray-200">
+                                        <div>
+                                            <div className="font-bold text-sm text-gray-900">任务最大并发</div>
+                                            <div className="text-xs text-gray-500 mt-0.5">同时执行任务的上限（默认 2；建议 1~5）</div>
+                                        </div>
+                                        <input
+                                            type="number"
+                                            min={1}
+                                            max={20}
+                                            value={taskMaxConcurrency}
+                                            onChange={(e) => setTaskMaxConcurrency(e.target.value)}
+                                            onBlur={() => {
+                                                const n = Number(String(taskMaxConcurrency).trim());
+                                                if (!Number.isFinite(n) || n <= 0) return;
+                                                const v = Math.max(1, Math.min(20, Math.floor(n)));
+                                                setTaskMaxConcurrency(String(v));
+                                                patchSystemConfig({ taskMaxConcurrency: v });
+                                            }}
+                                            className="w-28 px-3 py-2 border border-gray-200 rounded-lg text-sm text-right focus:border-brand-purple outline-none"
+                                        />
+                                    </div>
+
+                                    <div className="p-4 bg-gray-50 rounded-xl border border-gray-200">
+                                        <div>
+                                            <div className="font-bold text-sm text-gray-900">任务创建限流</div>
+                                            <div className="text-xs text-gray-500 mt-0.5">每个用户每分钟最多创建多少个任务（防止刷接口）</div>
+                                        </div>
+                                        <div className="mt-4 space-y-3">
+                                            <div className="flex items-center justify-between">
+                                                <span className="text-sm font-medium text-gray-700">免费版 (FREE)</span>
+                                                <div className="flex items-center gap-2">
+                                                    <input
+                                                        type="number"
+                                                        min={1}
+                                                        value={taskCreateRpmFree}
+                                                        onChange={(e) => setTaskCreateRpmFree(e.target.value)}
+                                                        onBlur={() => {
+                                                            const n = Number(String(taskCreateRpmFree).trim());
+                                                            if (!Number.isFinite(n) || n <= 0) return;
+                                                            const v = Math.max(1, Math.floor(n));
+                                                            setTaskCreateRpmFree(String(v));
+                                                            patchSystemConfig({ taskCreateRpmByPlan: { FREE: v } });
+                                                        }}
+                                                        className="w-28 px-3 py-2 border border-gray-200 rounded-lg text-sm text-right focus:border-brand-purple outline-none"
+                                                    />
+                                                    <span className="text-xs text-gray-400">任务/分钟</span>
+                                                </div>
+                                            </div>
+                                            <div className="flex items-center justify-between">
+                                                <span className="text-sm font-medium text-gray-700">开发者版 (PRO)</span>
+                                                <div className="flex items-center gap-2">
+                                                    <input
+                                                        type="number"
+                                                        min={1}
+                                                        value={taskCreateRpmPro}
+                                                        onChange={(e) => setTaskCreateRpmPro(e.target.value)}
+                                                        onBlur={() => {
+                                                            const n = Number(String(taskCreateRpmPro).trim());
+                                                            if (!Number.isFinite(n) || n <= 0) return;
+                                                            const v = Math.max(1, Math.floor(n));
+                                                            setTaskCreateRpmPro(String(v));
+                                                            patchSystemConfig({ taskCreateRpmByPlan: { PRO: v } });
+                                                        }}
+                                                        className="w-28 px-3 py-2 border border-gray-200 rounded-lg text-sm text-right focus:border-brand-purple outline-none"
+                                                    />
+                                                    <span className="text-xs text-gray-400">任务/分钟</span>
+                                                </div>
+                                            </div>
+                                            <div className="flex items-center justify-between">
+                                                <span className="text-sm font-medium text-gray-700">企业版 (ENTERPRISE)</span>
+                                                <div className="flex items-center gap-2">
+                                                    <input
+                                                        type="number"
+                                                        min={1}
+                                                        value={taskCreateRpmEnterprise}
+                                                        onChange={(e) => setTaskCreateRpmEnterprise(e.target.value)}
+                                                        onBlur={() => {
+                                                            const n = Number(String(taskCreateRpmEnterprise).trim());
+                                                            if (!Number.isFinite(n) || n <= 0) return;
+                                                            const v = Math.max(1, Math.floor(n));
+                                                            setTaskCreateRpmEnterprise(String(v));
+                                                            patchSystemConfig({ taskCreateRpmByPlan: { ENTERPRISE: v } });
+                                                        }}
+                                                        className="w-28 px-3 py-2 border border-gray-200 rounded-lg text-sm text-right focus:border-brand-purple outline-none"
+                                                    />
+                                                    <span className="text-xs text-gray-400">任务/分钟</span>
+                                                </div>
                                             </div>
                                         </div>
-                                    ))}
+                                    </div>
                                 </div>
-                            </div>
-                             <div className="px-6 py-4 bg-gray-50 border-t border-gray-100 flex justify-end">
-                                <button className="bg-brand-purple text-white px-6 py-2 rounded-lg text-sm font-bold hover:bg-brand-hover transition-colors shadow-lg flex items-center gap-2">
-                                    <Save size={16} /> 保存配置
-                                </button>
                             </div>
                         </div>
                     </div>
