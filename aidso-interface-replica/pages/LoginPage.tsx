@@ -121,7 +121,13 @@ export const LoginPage = ({ onNavigate, onLoginSuccess }: { onNavigate: (page: V
                          
                          {mode === 'login' && (
                              <div className="flex justify-end">
-                                 <span className="text-xs text-brand-purple font-medium cursor-pointer hover:underline">忘记密码?</span>
+                                 <a
+                                     href={`mailto:${config.supportEmail}?subject=${encodeURIComponent(`${config.siteName} - 找回密码`)}&body=${encodeURIComponent('请提供账号邮箱，我们将协助重置密码。')}`}
+                                     className="text-xs text-brand-purple font-medium hover:underline"
+                                     title={config.supportEmail}
+                                 >
+                                     忘记密码?
+                                 </a>
                              </div>
                          )}
 
@@ -158,7 +164,13 @@ export const LoginPage = ({ onNavigate, onLoginSuccess }: { onNavigate: (page: V
                                  {mode === 'login' ? '立即注册' : '直接登录'}
                              </span>
                          ) : (
-                             <span className="ml-1 text-gray-400 cursor-not-allowed">已关闭注册</span>
+                             <a
+                                 href={`mailto:${config.supportEmail}?subject=${encodeURIComponent(`${config.siteName} - 开通注册`)}&body=${encodeURIComponent('请协助开通注册/创建账号。')}`}
+                                 className="ml-1 text-gray-400 hover:text-brand-purple transition-colors"
+                                 title={config.supportEmail}
+                             >
+                                 已关闭注册（联系管理员）
+                             </a>
                          )}
                      </div>
                      
