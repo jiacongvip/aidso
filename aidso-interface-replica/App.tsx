@@ -1,5 +1,5 @@
 import React, { Suspense, useEffect } from 'react';
-import { BrowserRouter, Routes, Route, useNavigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, Outlet, useNavigate } from 'react-router-dom';
 import { MainLayout } from './layouts/MainLayout';
 import { SearchProvider } from './contexts/SearchContext';
 import { AuthProvider, PermissionGuard, ProtectedRoute, useAuth } from './contexts/AuthContext';
@@ -28,13 +28,36 @@ const LazyAgentWorkflowPage = React.lazy(() =>
 );
 const LazyResultsPage = React.lazy(() => import('./pages/ResultsPage').then((m) => ({ default: m.ResultsPage })));
 const LazyProfilePage = React.lazy(() => import('./pages/ProfilePage').then((m) => ({ default: m.ProfilePage })));
+const LazyMaintenancePage = React.lazy(() =>
+  import('./pages/MaintenancePage').then((m) => ({ default: m.MaintenancePage }))
+);
+
+const MaintenanceGuard = () => {
+  const { config, loading } = usePublicConfig();
+  const { user } = useAuth();
+
+  if (loading) return <PageLoading />;
+  if (config.maintenanceMode && user?.role !== 'ADMIN') {
+    return <Navigate to="/maintenance" replace />;
+  }
+  return <Outlet />;
+};
 
 const AppContent = () => {
     return (
         <Routes>
             <Route path="/login" element={<LoginPageWrapper />} />
+            <Route
+              path="/maintenance"
+              element={
+                <Suspense fallback={<PageLoading />}>
+                  <LazyMaintenancePage />
+                </Suspense>
+              }
+            />
             
-            <Route element={<MainLayout />}>
+            <Route element={<MaintenanceGuard />}>
+              <Route element={<MainLayout />}>
                 <Route path="/" element={<PermissionGuard feature="search"><ReplicaHomePage /></PermissionGuard>} />
                 <Route
                   path="/landing"
@@ -114,13 +137,17 @@ const AppContent = () => {
                     </PermissionGuard>
                   }
                 />
-            </Route>
-            
-            <Route path="/admin" element={
-                <ProtectedRoute adminOnly>
+              </Route>
+
+              <Route
+                path="/admin"
+                element={
+                  <ProtectedRoute adminOnly>
                     <AdminPageWrapper />
-                </ProtectedRoute>
-            } />
+                  </ProtectedRoute>
+                }
+              />
+            </Route>
         </Routes>
     );
 };

@@ -4,6 +4,8 @@ import { SITE_NAME as FALLBACK_SITE_NAME } from '../branding';
 
 export type PublicConfig = {
   siteName: string;
+  maintenanceMode: boolean;
+  signupEnabled: boolean;
   enabledModels: string[];
   models: { key: string; enabled: boolean; ready: boolean; missing: string[] }[];
 };
@@ -24,7 +26,13 @@ export function usePublicConfig() {
 }
 
 export function PublicConfigProvider({ children }: { children: React.ReactNode }) {
-  const [config, setConfig] = useState<PublicConfig>({ siteName: FALLBACK_SITE_NAME, enabledModels: [], models: [] });
+  const [config, setConfig] = useState<PublicConfig>({
+    siteName: FALLBACK_SITE_NAME,
+    maintenanceMode: false,
+    signupEnabled: true,
+    enabledModels: [],
+    models: [],
+  });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -34,14 +42,20 @@ export function PublicConfigProvider({ children }: { children: React.ReactNode }
     try {
       const { res, data } = await apiJson<{
         siteName: string | null;
+        maintenanceMode?: boolean;
+        signupEnabled?: boolean;
         enabledModels: string[];
         models?: { key: string; enabled: boolean; ready: boolean; missing?: string[] }[];
       }>('/api/config/public');
       if (!res.ok) throw new Error(apiErrorToMessage(data, `加载失败（HTTP ${res.status}）`));
       const siteNameRaw = (data && (data as any).siteName) as any;
+      const maintenanceModeRaw = (data && (data as any).maintenanceMode) as any;
+      const signupEnabledRaw = (data && (data as any).signupEnabled) as any;
       const enabledModelsRaw = (data && (data as any).enabledModels) as any;
       const modelsRaw = (data && (data as any).models) as any;
       const siteName = typeof siteNameRaw === 'string' && siteNameRaw.trim() ? siteNameRaw.trim() : FALLBACK_SITE_NAME;
+      const maintenanceMode = maintenanceModeRaw === true;
+      const signupEnabled = signupEnabledRaw !== false;
       const enabledModels = Array.isArray(enabledModelsRaw) ? enabledModelsRaw.filter((x) => typeof x === 'string') : [];
       const models = Array.isArray(modelsRaw)
         ? modelsRaw
@@ -53,10 +67,16 @@ export function PublicConfigProvider({ children }: { children: React.ReactNode }
               missing: Array.isArray(m.missing) ? m.missing.filter((x: any) => typeof x === 'string') : [],
             }))
         : [];
-      setConfig({ siteName, enabledModels, models });
+      setConfig({ siteName, maintenanceMode, signupEnabled, enabledModels, models });
     } catch (e: any) {
       setError(e?.message || '加载失败');
-      setConfig({ siteName: FALLBACK_SITE_NAME, enabledModels: [], models: [] });
+      setConfig({
+        siteName: FALLBACK_SITE_NAME,
+        maintenanceMode: false,
+        signupEnabled: true,
+        enabledModels: [],
+        models: [],
+      });
     } finally {
       setLoading(false);
     }

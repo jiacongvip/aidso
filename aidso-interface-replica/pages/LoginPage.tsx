@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Search, Mail, Lock, Github, MessageCircle, Shield } from 'lucide-react';
 import { usePublicConfig } from '../contexts/PublicConfigContext';
 
@@ -8,6 +8,7 @@ type ViewState = 'landing' | 'results' | 'login' | 'pricing' | 'api' | 'monitori
 export const LoginPage = ({ onNavigate, onLoginSuccess }: { onNavigate: (page: ViewState) => void, onLoginSuccess?: (user: any) => void }) => {
     const [mode, setMode] = useState<'login' | 'register'>('login');
     const { config } = usePublicConfig();
+    const canSignup = config.signupEnabled !== false;
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [loading, setLoading] = useState(false);
@@ -17,6 +18,10 @@ export const LoginPage = ({ onNavigate, onLoginSuccess }: { onNavigate: (page: V
         (window.location.hostname === 'localhost' ||
             window.location.hostname === '127.0.0.1' ||
             window.location.hostname === '0.0.0.0');
+
+    useEffect(() => {
+        if (!canSignup && mode === 'register') setMode('login');
+    }, [canSignup, mode]);
 
     const handleLogin = async () => {
         setLoading(true);
@@ -148,9 +153,13 @@ export const LoginPage = ({ onNavigate, onLoginSuccess }: { onNavigate: (page: V
                  <div className="bg-gray-50 p-4 flex justify-between items-center text-xs font-medium border-t border-gray-100">
                      <div className="text-gray-500">
                          {mode === 'login' ? '还没有账号? ' : '已有账号? '}
-                         <span onClick={() => setMode(mode === 'login' ? 'register' : 'login')} className="text-brand-purple cursor-pointer hover:underline ml-1">
-                             {mode === 'login' ? '立即注册' : '直接登录'}
-                         </span>
+                         {canSignup ? (
+                             <span onClick={() => setMode(mode === 'login' ? 'register' : 'login')} className="text-brand-purple cursor-pointer hover:underline ml-1">
+                                 {mode === 'login' ? '立即注册' : '直接登录'}
+                             </span>
+                         ) : (
+                             <span className="ml-1 text-gray-400 cursor-not-allowed">已关闭注册</span>
+                         )}
                      </div>
                      
                      <div className="text-right">

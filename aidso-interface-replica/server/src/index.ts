@@ -438,6 +438,39 @@ function parseDateRangeShanghai(params: { from?: any; to?: any }) {
 app.use(cors());
 app.use(express.json());
 
+// --- Maintenance Mode Guard ---
+// When enabled, block most /api routes for non-admin users, but still allow
+// basic public endpoints (health/config) and login so admins can recover.
+app.use('/api', async (req, res, next) => {
+  try {
+    // Always allow CORS preflight
+    if (req.method === 'OPTIONS') return next();
+
+    const config = readAppConfig();
+    const maintenanceMode = !!(config && config.system && (config.system as any).maintenanceMode);
+    if (!maintenanceMode) return next();
+
+    const allowPaths = new Set<string>([
+      '/health',
+      '/config/public',
+      '/auth/login',
+      '/auth/me',
+      '/auth/logout',
+    ]);
+
+    // Express trims mount path for req.path when using app.use('/api', ...)
+    if (allowPaths.has(req.path)) return next();
+
+    const user = await getAuthUser(req);
+    if (user && (user as any).role === 'ADMIN') return next();
+
+    return res.status(503).json({ error: 'Maintenance', message: '系统维护中，请稍后再试' });
+  } catch (err) {
+    console.error('[Maintenance] middleware error', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
 async function createTaskForUser(params: {
   user: any;
   keyword: any;
@@ -1486,6 +1519,8 @@ app.get('/api/config/public', (req, res) => {
     const config = readAppConfig();
     const siteNameRaw = (config && config.system && (config.system as any).siteName) as any;
     const siteName = typeof siteNameRaw === 'string' ? siteNameRaw.trim() : '';
+    const maintenanceMode = !!(config && config.system && (config.system as any).maintenanceMode);
+    const signupEnabled = !(config && config.system && (config.system as any).signupEnabled === false);
 
     const models = config?.newApi?.models;
     const enabledModelsRaw =
@@ -1517,6 +1552,8 @@ app.get('/api/config/public', (req, res) => {
 
     res.json({
       siteName: siteName || null,
+      maintenanceMode,
+      signupEnabled,
       enabledModels: enabledModelsRaw,
       models: modelStates,
     });
