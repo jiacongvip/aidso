@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { CreditCard, BarChart3, ArrowRight, Settings, Loader2, CheckCircle2, XCircle } from 'lucide-react';
+import { CreditCard, BarChart3, ArrowRight, Settings, Loader2, CheckCircle2, XCircle, KeyRound } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import { apiJson } from '../services/api';
+import { apiErrorToMessage, apiJson } from '../services/api';
 import { useTasks } from '../contexts/TaskContext';
 import { MyBrandMentionsPanel } from '../components/MyBrandMentionsPanel';
 
@@ -34,6 +34,12 @@ export const ProfilePage = () => {
   const [loading, setLoading] = useState(true);
   const [insights, setInsights] = useState<Insights | null>(null);
   const [insightsLoading, setInsightsLoading] = useState(true);
+  const [oldPassword, setOldPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [newPassword2, setNewPassword2] = useState('');
+  const [pwLoading, setPwLoading] = useState(false);
+  const [pwError, setPwError] = useState('');
+  const [pwOk, setPwOk] = useState('');
 
   useEffect(() => {
     setLoading(true);
@@ -61,6 +67,50 @@ export const ProfilePage = () => {
     if (summary.plan === 'PRO') return '开发者版';
     return '企业版';
   }, [summary?.plan]);
+
+  const handleChangePassword = async () => {
+    setPwOk('');
+    setPwError('');
+
+    if (!oldPassword || !newPassword) {
+      setPwError('请输入旧密码与新密码');
+      return;
+    }
+    if (newPassword.length < 6) {
+      setPwError('新密码至少 6 位');
+      return;
+    }
+    if (newPassword !== newPassword2) {
+      setPwError('两次输入的新密码不一致');
+      return;
+    }
+    if (newPassword === oldPassword) {
+      setPwError('新密码不能与旧密码相同');
+      return;
+    }
+
+    setPwLoading(true);
+    try {
+      const { res, data } = await apiJson<{ success?: boolean; error?: string; message?: string }>(
+        '/api/auth/change-password',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ oldPassword, newPassword }),
+        }
+      );
+      if (!res.ok) throw new Error(apiErrorToMessage(data, `修改失败（HTTP ${res.status}）`));
+
+      setOldPassword('');
+      setNewPassword('');
+      setNewPassword2('');
+      setPwOk('密码已更新');
+    } catch (err: any) {
+      setPwError(err?.message || '修改失败');
+    } finally {
+      setPwLoading(false);
+    }
+  };
 
   if (!user) return null;
 
@@ -138,6 +188,68 @@ export const ProfilePage = () => {
                 发起新任务 <span className="text-gray-400 font-medium">→</span>
               </button>
             </div>
+          </div>
+        </div>
+
+        <div className="mt-6 bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-bold text-gray-900">账号安全</div>
+            <KeyRound size={18} className="text-gray-700" />
+          </div>
+
+          <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+            <div>
+              <div className="text-[10px] font-bold text-gray-600 mb-1">旧密码</div>
+              <input
+                type="password"
+                value={oldPassword}
+                onChange={(e) => setOldPassword(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-200 rounded-xl text-sm focus:border-brand-purple outline-none"
+                placeholder="请输入旧密码"
+              />
+            </div>
+            <div>
+              <div className="text-[10px] font-bold text-gray-600 mb-1">新密码</div>
+              <input
+                type="password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-200 rounded-xl text-sm focus:border-brand-purple outline-none"
+                placeholder="至少 6 位"
+              />
+            </div>
+            <div>
+              <div className="text-[10px] font-bold text-gray-600 mb-1">确认新密码</div>
+              <input
+                type="password"
+                value={newPassword2}
+                onChange={(e) => setNewPassword2(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-200 rounded-xl text-sm focus:border-brand-purple outline-none"
+                placeholder="再次输入新密码"
+              />
+            </div>
+          </div>
+
+          {(pwError || pwOk) && (
+            <div className="mt-3">
+              {pwError && (
+                <div className="text-xs text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">{pwError}</div>
+              )}
+              {pwOk && (
+                <div className="text-xs text-green-700 bg-green-50 border border-green-100 rounded-lg px-3 py-2">{pwOk}</div>
+              )}
+            </div>
+          )}
+
+          <div className="mt-3 flex items-center justify-between gap-4">
+            <div className="text-[10px] text-gray-400">为了安全，建议定期修改密码。</div>
+            <button
+              onClick={handleChangePassword}
+              disabled={pwLoading}
+              className="bg-gray-900 text-white px-4 py-2 rounded-xl text-sm font-bold hover:bg-gray-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {pwLoading ? '提交中...' : '更新密码'}
+            </button>
           </div>
         </div>
 

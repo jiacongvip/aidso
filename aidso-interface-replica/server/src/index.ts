@@ -1846,6 +1846,32 @@ app.get('/api/auth/me', requireAuth(), async (req, res) => {
   res.json({ user: sanitizeUser(user) });
 });
 
+app.post('/api/auth/change-password', requireAuth(), async (req, res) => {
+  const authed = (req as any).user;
+  const { oldPassword, newPassword } = req.body || {};
+
+  if (!oldPassword || typeof oldPassword !== 'string') return res.status(400).json({ error: 'Old password is required' });
+  if (!newPassword || typeof newPassword !== 'string') return res.status(400).json({ error: 'New password is required' });
+  if (newPassword.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+  if (newPassword === oldPassword) return res.status(400).json({ error: 'New password must be different' });
+
+  try {
+    const user = await prisma.user.findUnique({ where: { id: authed.id } });
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    if (!verifyPassword(oldPassword, user.password)) return res.status(401).json({ error: '旧密码不正确' });
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { password: hashPassword(newPassword) },
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Change password failed', error);
+    res.status(500).json({ error: 'Change password failed' });
+  }
+});
+
 app.post('/api/auth/logout', (req, res) => {
   // Client should drop token; server remains stateless for now.
   res.json({ success: true });
