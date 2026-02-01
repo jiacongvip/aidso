@@ -20,10 +20,10 @@ import { ReplicaHomePage } from './pages/ReplicaHome/ReplicaHomePage';
 const AppContent = () => {
     return (
         <Routes>
-            <Route path="/" element={<ReplicaHomePage />} />
             <Route path="/login" element={<LoginPageWrapper />} />
             
             <Route element={<MainLayout />}>
+                <Route path="/" element={<PermissionGuard feature="search"><ReplicaHomePage /></PermissionGuard>} />
                 <Route path="/landing" element={<PermissionGuard feature="search"><LandingPage /></PermissionGuard>} />
                 <Route path="/results" element={<PermissionGuard feature="search"><ResultsPage /></PermissionGuard>} />
                 <Route path="/agent" element={<PermissionGuard feature="agent"><AgentWorkflowPage /></PermissionGuard>} />
