@@ -55,8 +55,17 @@ export const Footer = () => {
                         <li className="hover:text-brand-purple cursor-pointer transition-colors flex items-center gap-2">
                             系统状态
                             <span className="relative flex h-2 w-2">
-                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-                                <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+                                <span
+                                    className={`animate-ping absolute inline-flex h-full w-full rounded-full ${
+                                        config.maintenanceMode ? 'bg-amber-400' : 'bg-green-400'
+                                    } opacity-75`}
+                                ></span>
+                                <span
+                                    className={`relative inline-flex rounded-full h-2 w-2 ${
+                                        config.maintenanceMode ? 'bg-amber-500' : 'bg-green-500'
+                                    }`}
+                                    title={config.maintenanceMode ? '维护中' : '运行中'}
+                                ></span>
                             </span>
                         </li>
                     </ul>
@@ -67,7 +76,15 @@ export const Footer = () => {
                     <ul className="space-y-4 text-sm text-gray-500">
                         <li className="hover:text-brand-purple cursor-pointer transition-colors">关于我们</li>
                         <li className="hover:text-brand-purple cursor-pointer transition-colors">招贤纳士</li>
-                        <li className="hover:text-brand-purple cursor-pointer transition-colors">联系方式</li>
+                        <li>
+                            <a
+                                href={`mailto:${config.supportEmail}`}
+                                className="hover:text-brand-purple transition-colors"
+                                title={config.supportEmail}
+                            >
+                                联系方式
+                            </a>
+                        </li>
                         <li className="hover:text-brand-purple cursor-pointer transition-colors">合作伙伴</li>
                     </ul>
                 </div>
