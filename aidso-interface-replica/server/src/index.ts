@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 import fs from 'fs';
 import path from 'path';
 import OpenAI from 'openai';
@@ -2214,16 +2214,17 @@ app.post('/api/tasks/:id/retry', requireAuth(), async (req, res) => {
     await prisma.brandMention.deleteMany({ where: { taskId: id } }).catch(() => {});
     await prisma.taskModelRun.deleteMany({ where: { taskId: id } }).catch(() => {});
 
-    await prisma.task.update({
-      where: { id },
-      data: {
-        status: 'PENDING',
-        progress: 0,
-        result: null,
-        logs: { push: '♻️ 已触发重试（不重复扣费），任务将重新排队执行' },
-        startTime: new Date(),
-      },
-    });
+	    await prisma.task.update({
+	      where: { id },
+	      data: {
+	        status: 'PENDING',
+	        progress: 0,
+	        // Json? fields do not accept raw null; use Prisma.DbNull to clear to SQL NULL.
+	        result: Prisma.DbNull,
+	        logs: { push: '♻️ 已触发重试（不重复扣费），任务将重新排队执行' },
+	        startTime: new Date(),
+	      },
+	    });
 
     enqueueTask({
       taskId: id,
@@ -6124,18 +6125,19 @@ async function recoverStuckTasksOnStartup() {
         // Clear derived data to avoid duplicates after restart.
         await prisma.brandMention.deleteMany({ where: { taskId: t.id } }).catch(() => {});
         await prisma.taskModelRun.deleteMany({ where: { taskId: t.id } }).catch(() => {});
-        await prisma.task
-          .update({
-            where: { id: t.id },
-            data: {
-              status: 'PENDING',
-              progress: 0,
-              result: null,
-              logs: { push: '♻️ 服务重启：检测到任务中断，已恢复并重新排队执行' },
-              startTime: new Date(),
-            },
-          })
-          .catch(() => {});
+	        await prisma.task
+	          .update({
+	            where: { id: t.id },
+	            data: {
+	              status: 'PENDING',
+	              progress: 0,
+	              // Json? fields do not accept raw null; use Prisma.DbNull to clear to SQL NULL.
+	              result: Prisma.DbNull,
+	              logs: { push: '♻️ 服务重启：检测到任务中断，已恢复并重新排队执行' },
+	              startTime: new Date(),
+	            },
+	          })
+	          .catch(() => {});
       } else {
         await prisma.task
           .update({
